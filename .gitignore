@@ -1,0 +1,6 @@
+.DS_Store
+.psd
+links
+*.log
+.build/
+dist/
