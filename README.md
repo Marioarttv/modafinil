@@ -7,6 +7,8 @@
 
 ---
 
+https://github.com/user-attachments/assets/a03f5bb4-d979-4af5-a895-949414f0efb8
+
 A macOS menu bar app that prevents your MacBook from falling asleep when the lid is closed, but doesn't let the display stay on.
 
 Motivated by the need to let coding agents stay running while you carry your MacBook around.
