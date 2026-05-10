@@ -22,7 +22,7 @@ Install through the `.dmg` in Releases.
 
 Requires App Background Activity permission (`System Settings -> General -> Login Items & Extensions`). Should pop up automatically on first run.
 
-Left click to activate/deactivate. Right click for menu, where you can quit the app and also uninstall it.
+Left click to open the status window, where you can see why Modafinil is active, inactive, or waiting, and activate/deactivate it. Right click for menu, where you can quit the app and also uninstall it.
 
 The menu also includes an "Only While Codex Is Running" option. When enabled, Modafinil keeps sleep prevention requested but only applies it while a Codex app or `codex` command is running.
 

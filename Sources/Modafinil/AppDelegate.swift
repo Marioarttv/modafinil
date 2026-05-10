@@ -1,13 +1,15 @@
 import AppKit
 import ServiceManagement
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, StatusPopoverViewControllerDelegate {
     private let helperClient = PrivilegedHelperClient()
     private let helperInstaller = PrivilegedHelperInstaller()
     private let lidMonitor = LidMonitor()
     private let codexRuntimeMonitor = CodexRuntimeMonitor()
+    private let statusPopover = NSPopover()
 
     private var statusItem: NSStatusItem!
+    private var statusPopoverViewController: StatusPopoverViewController?
     private var isSleepPreventionEnabled = false
     private var isSleepPreventionRequested = false
     private var hasLoadedInitialSleepRequest = false
@@ -76,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         NotificationCenter.default.removeObserver(self)
         codexRuntimeTimer?.invalidate()
+        statusPopover.performClose(nil)
         helperClient.invalidate()
         lidMonitor.stop()
     }
@@ -98,7 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        toggleSleepPrevention()
+        showStatusPopover()
     }
 
     @objc private func toggleSleepPrevention() {
@@ -400,6 +403,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setControlsEnabled(_ enabled: Bool) {
         statusItem?.button?.isEnabled = enabled
+        statusPopoverViewController?.view.window?.ignoresMouseEvents = !enabled
+    }
+
+    @objc private func showStatusPopover() {
+        refreshHelperStatus()
+        refreshCodexRuntimeState(shouldReconcile: false)
+
+        guard let button = statusItem.button else { return }
+
+        if statusPopover.isShown {
+            statusPopover.performClose(nil)
+            return
+        }
+
+        let viewController = statusPopoverViewController ?? StatusPopoverViewController()
+        viewController.delegate = self
+        viewController.update(with: makeStatusViewModel())
+        statusPopoverViewController = viewController
+
+        statusPopover.behavior = .transient
+        statusPopover.animates = true
+        statusPopover.contentViewController = viewController
+        statusPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    }
+
+    private func refreshStatusPopover() {
+        guard statusPopover.isShown else { return }
+        statusPopoverViewController?.update(with: makeStatusViewModel())
+    }
+
+    func statusPopoverDidToggleSleepPrevention(_ viewController: StatusPopoverViewController) {
+        toggleSleepPrevention()
+    }
+
+    func statusPopoverDidToggleCodexRuntimeLimit(_ viewController: StatusPopoverViewController) {
+        toggleCodexRuntimeLimit()
+    }
+
+    func statusPopoverDidOpenBackgroundSettings(_ viewController: StatusPopoverViewController) {
+        openSettings()
+    }
+
+    func statusPopoverDidQuit(_ viewController: StatusPopoverViewController) {
+        statusPopover.performClose(nil)
+        quit()
     }
 
     private func startCodexRuntimeMonitoring() {
@@ -522,6 +570,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             "Mac is not on Modafinil"
         }
+
+        refreshStatusPopover()
     }
 
     private func showMenu() {
@@ -548,6 +598,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(.separator())
+
+        let showStatusItem = NSMenuItem(
+            title: "Show Status",
+            action: #selector(showStatusPopover),
+            keyEquivalent: ""
+        )
+        showStatusItem.target = self
+        menu.addItem(showStatusItem)
 
         let toggleItem = NSMenuItem(
             title: isSleepPreventionRequested ? "Turn Off" : "Turn On",
@@ -601,6 +659,119 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
         statusItem.menu = nil
+    }
+
+    private func makeStatusViewModel() -> StatusPopoverViewController.ViewModel {
+        StatusPopoverViewController.ViewModel(
+            symbolName: statusSymbolName,
+            symbolColor: statusSymbolColor,
+            title: statusTitle,
+            explanation: statusExplanation,
+            requestedStatus: isSleepPreventionRequested ? "On" : "Off",
+            effectiveStatus: effectiveSleepPreventionStatus,
+            codexLimitStatus: isCodexRuntimeLimitEnabled ? "Enabled" : "Disabled",
+            codexStatus: isCodexRunning ? "Running" : "Not running",
+            helperStatus: helperStatusDescription,
+            primaryActionTitle: isSleepPreventionRequested ? "Turn Off" : "Turn On",
+            isPrimaryActionEnabled: !isToggleInFlight,
+            isCodexRuntimeLimitEnabled: isCodexRuntimeLimitEnabled,
+            lastError: lastError
+        )
+    }
+
+    private var statusTitle: String {
+        if isToggleInFlight {
+            return "Updating Modafinil"
+        }
+
+        if isSleepPreventionEnabled {
+            return "Sleep prevention is active"
+        }
+
+        if isWaitingForCodex {
+            return "Waiting for Codex"
+        }
+
+        return "Normal sleep is active"
+    }
+
+    private var statusExplanation: String {
+        if isToggleInFlight {
+            return "Modafinil is asking the privileged helper to update the system sleep setting."
+        }
+
+        if isSleepPreventionEnabled, isCodexRuntimeLimitEnabled {
+            return "Codex is running, so Modafinil is keeping your Mac awake. Sleep prevention will turn off when Codex stops."
+        }
+
+        if isSleepPreventionEnabled {
+            return "Modafinil is keeping your Mac awake until you turn it off or quit the app."
+        }
+
+        if isWaitingForCodex {
+            return "You asked Modafinil to turn on only for Codex. Codex is not running, so regular sleep behavior is restored for now."
+        }
+
+        if isSleepPreventionRequested {
+            return "Modafinil is requested, but the current mode does not allow it to apply sleep prevention yet."
+        }
+
+        return "Modafinil is off and your Mac is using regular sleep behavior."
+    }
+
+    private var statusSymbolName: String {
+        if isToggleInFlight {
+            return "arrow.triangle.2.circlepath"
+        }
+
+        if isSleepPreventionEnabled {
+            return "eye.fill"
+        }
+
+        if isWaitingForCodex {
+            return "clock"
+        }
+
+        return Self.inactiveSymbolName
+    }
+
+    private var statusSymbolColor: NSColor {
+        if isToggleInFlight {
+            return .systemBlue
+        }
+
+        if isSleepPreventionEnabled {
+            return .systemGreen
+        }
+
+        if isWaitingForCodex {
+            return .systemOrange
+        }
+
+        return .secondaryLabelColor
+    }
+
+    private var effectiveSleepPreventionStatus: String {
+        if isToggleInFlight {
+            return "Updating"
+        }
+
+        return isSleepPreventionEnabled ? "Active" : "Inactive"
+    }
+
+    private var helperStatusDescription: String {
+        switch helperStatus {
+        case .enabled:
+            return "Enabled"
+        case .requiresApproval:
+            return "Needs approval"
+        case .notRegistered:
+            return "Not registered"
+        case .notFound:
+            return "Not found"
+        @unknown default:
+            return "Unknown"
+        }
     }
 
     private func showError(title: String, message: String) {
