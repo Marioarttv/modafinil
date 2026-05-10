@@ -7,39 +7,16 @@
 
 ---
 
-Modafinil is a macOS status bar app for one specific workflow:
+A macOS menu bar app that prevents your MacBook from falling asleep when the lid is closed, but doesn't let the display stay on.
 
-1. Prevent lid-close sleep with `pmset -a disablesleep 1`.
-2. Immediately turn off the built-in display when the lid closes without an external display connected.
-3. Restore normal lid-close sleep behavior when turned off.
+Motivated by the need to let coding agents stay running while you carry your MacBook around.
 
-It exists because the existing utilities checked did not combine lid-close sleep prevention with immediate display turn-off on lid close.
+## Installation & Usage
 
-## Architecture
+Install through the `.dmg` in Releases.
 
-Modafinil is split into two compiled processes:
+Needs App Background Activity permission in System Settings (General -> Login Items & Extensions). Should pop up automatically on first run.
 
-- `Modafinil.app`: user-session status bar app. It owns the lid-close listener and runs `pmset displaysleepnow` when the lid closes while Modafinil is active, unless an external display is connected.
-- `ModafinilHelper`: privileged LaunchDaemon. It exposes a narrow XPC API for only:
-  - `pmset -a disablesleep 1`
-  - `pmset -a disablesleep 0`
-  - reading the current `SleepDisabled` state
+Left click to activate/deactivate. Right click for menu, where you can quit the app and also uninstall it.
 
-The helper is bundled inside the app and registered with `SMAppService`. The user approves the helper once; after that, turning Modafinil on/off should not require entering an admin password each time.
-
-## Run
-
-Modafinil must run from `/Applications`. If launched from anywhere else, it exits after showing an alert.
-
-Controls:
-
-- Left-click the status bar icon to toggle Modafinil on/off.
-- Right-click or Option-click the icon to open the menu.
-- If the helper is not installed, turning Modafinil on starts helper setup.
-- If macOS reports that approval is required, Modafinil opens App Background Activity settings so the helper can be approved.
-- Use **Uninstall Modafinil...** to restore normal sleep behavior, remove the helper, clear Modafinil settings, and quit. The app bundle is deleted only when running from `/Applications`.
-
-Status icon:
-
-- Open eye symbol: sleep prevention is active.
-- Half-closed eye symbol: normal sleep behavior is active.
+Tested on only Apple Silicon Macs with macOS 13+.
