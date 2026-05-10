@@ -5,15 +5,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let helperClient = PrivilegedHelperClient()
     private let helperInstaller = PrivilegedHelperInstaller()
     private let lidMonitor = LidMonitor()
+    private let codexRuntimeMonitor = CodexRuntimeMonitor()
 
     private var statusItem: NSStatusItem!
     private var isSleepPreventionEnabled = false
+    private var isSleepPreventionRequested = false
+    private var hasLoadedInitialSleepRequest = false
     private var isToggleInFlight = false
+    private var needsReconcileAfterToggle = false
     private var helperStatus: SMAppService.Status = .notRegistered
     private var lastError: String?
     private var sleepStatusGeneration = 0
     private var isQuitInProgress = false
     private var isTerminatingAfterCleanup = false
+    private var isCodexRuntimeLimitEnabled = UserDefaults.standard.bool(
+        forKey: AppDelegate.codexRuntimeLimitEnabledDefaultsKey
+    )
+    private var isCodexRunning = false
+    private var codexRuntimeTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("Modafinil applicationDidFinishLaunching")
@@ -44,6 +53,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             lastError = error.localizedDescription
         }
 
+        refreshCodexRuntimeState(shouldReconcile: false)
+        startCodexRuntimeMonitoring()
         refreshHelperStatus()
         refreshSleepStatus()
         refreshIcon()
@@ -64,6 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         NotificationCenter.default.removeObserver(self)
+        codexRuntimeTimer?.invalidate()
         helperClient.invalidate()
         lidMonitor.stop()
     }
@@ -94,15 +106,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         lastError = nil
 
-        let nextState = !isSleepPreventionEnabled
+        let nextState = !isSleepPreventionRequested
 
+        isSleepPreventionRequested = nextState
         refreshHelperStatus()
-        guard helperStatus == .enabled else {
-            installHelper(stateAfterInstall: nextState)
-            return
-        }
-
-        setSleepPreventionEnabled(nextState)
+        reconcileSleepPreventionWithCurrentMode()
     }
 
     private func setSleepPreventionEnabled(_ enabled: Bool) {
@@ -129,7 +137,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             self.isToggleInFlight = false
             self.refreshIcon()
+
+            if self.needsReconcileAfterToggle {
+                self.needsReconcileAfterToggle = false
+                self.reconcileSleepPreventionWithCurrentMode()
+            }
         }
+    }
+
+    private func reconcileSleepPreventionWithCurrentMode() {
+        if isToggleInFlight {
+            needsReconcileAfterToggle = true
+            return
+        }
+
+        let enabled = shouldEnableSleepPreventionNow
+
+        guard isSleepPreventionEnabled != enabled else {
+            refreshIcon()
+            return
+        }
+
+        refreshHelperStatus()
+        guard helperStatus == .enabled else {
+            if enabled || isSleepPreventionEnabled {
+                installHelper(stateAfterInstall: enabled)
+            } else {
+                refreshIcon()
+            }
+            return
+        }
+
+        setSleepPreventionEnabled(enabled)
+    }
+
+    private var shouldEnableSleepPreventionNow: Bool {
+        isSleepPreventionRequested && (!isCodexRuntimeLimitEnabled || isCodexRunning)
+    }
+
+    private var isWaitingForCodex: Bool {
+        isSleepPreventionRequested && isCodexRuntimeLimitEnabled && !isCodexRunning
     }
 
     @objc private func installHelper() {
@@ -252,6 +299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if localSleepPreventionStatus == false {
             isSleepPreventionEnabled = false
+            isSleepPreventionRequested = false
             lidMonitor.setEnabled(false)
             completion(.success(()))
             return
@@ -274,6 +322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             if case .success = result {
                 self.isSleepPreventionEnabled = false
+                self.isSleepPreventionRequested = false
                 self.lidMonitor.setEnabled(false)
             }
 
@@ -353,6 +402,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.button?.isEnabled = enabled
     }
 
+    private func startCodexRuntimeMonitoring() {
+        codexRuntimeTimer?.invalidate()
+
+        let timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
+            self?.refreshCodexRuntimeState()
+        }
+        codexRuntimeTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func refreshCodexRuntimeState(shouldReconcile: Bool = true) {
+        let wasCodexRunning = isCodexRunning
+        isCodexRunning = codexRuntimeMonitor.isCodexRunning()
+
+        guard shouldReconcile, isCodexRuntimeLimitEnabled else {
+            refreshIcon()
+            return
+        }
+
+        if wasCodexRunning != isCodexRunning {
+            reconcileSleepPreventionWithCurrentMode()
+        } else {
+            refreshIcon()
+        }
+    }
+
+    @objc private func toggleCodexRuntimeLimit() {
+        lastError = nil
+        isCodexRuntimeLimitEnabled.toggle()
+        UserDefaults.standard.set(
+            isCodexRuntimeLimitEnabled,
+            forKey: Self.codexRuntimeLimitEnabledDefaultsKey
+        )
+
+        refreshCodexRuntimeState(shouldReconcile: false)
+        reconcileSleepPreventionWithCurrentMode()
+    }
+
     private func refreshHelperStatus() {
         helperStatus = helperInstaller.status
     }
@@ -364,17 +451,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let localSleepPreventionStatus = readLocalSleepPreventionStatus() {
             isSleepPreventionEnabled = localSleepPreventionStatus
+            syncInitialSleepRequestIfNeeded(localSleepPreventionStatus)
             lidMonitor.setEnabled(localSleepPreventionStatus)
             if localSleepPreventionStatus {
                 lidMonitor.turnDisplayOffIfNeeded()
             }
         } else if helperStatus != .enabled {
             isSleepPreventionEnabled = false
+            syncInitialSleepRequestIfNeeded(false)
             lidMonitor.setEnabled(false)
         }
 
         guard helperStatus == .enabled else {
-            refreshIcon()
+            reconcileSleepPreventionWithCurrentMode()
             return
         }
 
@@ -385,6 +474,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             switch result {
             case .success(let enabled):
                 self.isSleepPreventionEnabled = enabled
+                self.syncInitialSleepRequestIfNeeded(enabled)
                 self.lidMonitor.setEnabled(enabled)
                 if enabled {
                     self.lidMonitor.turnDisplayOffIfNeeded()
@@ -393,16 +483,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.lastError = error.localizedDescription
             }
 
-            self.refreshIcon()
+            self.reconcileSleepPreventionWithCurrentMode()
         }
+    }
+
+    private func syncInitialSleepRequestIfNeeded(_ enabled: Bool) {
+        guard !hasLoadedInitialSleepRequest else { return }
+
+        isSleepPreventionRequested = enabled
+        hasLoadedInitialSleepRequest = true
     }
 
     private func refreshIcon() {
         let symbolName = isSleepPreventionEnabled ? "eye.fill" : Self.inactiveSymbolName
         let configuration = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+        let accessibilityDescription = if isSleepPreventionEnabled {
+            "Modafinil active"
+        } else if isWaitingForCodex {
+            "Modafinil waiting for Codex"
+        } else {
+            "Modafinil inactive"
+        }
         let image = NSImage(
             systemSymbolName: symbolName,
-            accessibilityDescription: isSleepPreventionEnabled ? "Modafinil active" : "Modafinil inactive"
+            accessibilityDescription: accessibilityDescription
         )?.withSymbolConfiguration(configuration)
         image?.size = NSSize(width: 18, height: 18)
         image?.isTemplate = true
@@ -411,17 +515,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.imageScaling = .scaleProportionallyDown
         statusItem.button?.title = image == nil ? "M" : ""
         statusItem.length = NSStatusItem.squareLength
-        statusItem.button?.toolTip = isSleepPreventionEnabled
-            ? "Mac is on Modafinil"
-            : "Mac is not on Modafinil"
+        statusItem.button?.toolTip = if isSleepPreventionEnabled {
+            "Mac is on Modafinil"
+        } else if isWaitingForCodex {
+            "Modafinil will turn on when Codex is running"
+        } else {
+            "Mac is not on Modafinil"
+        }
     }
 
     private func showMenu() {
         refreshHelperStatus()
+        refreshCodexRuntimeState(shouldReconcile: false)
 
         let menu = NSMenu()
 
-        let statusText = isSleepPreventionEnabled ? "Status: On Modafinil" : "Status: Not on Modafinil"
+        let statusText = if isSleepPreventionEnabled {
+            "Status: On Modafinil"
+        } else if isWaitingForCodex {
+            "Status: Waiting for Codex"
+        } else {
+            "Status: Not on Modafinil"
+        }
         let stateItem = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
         stateItem.isEnabled = false
         menu.addItem(stateItem)
@@ -435,12 +550,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         let toggleItem = NSMenuItem(
-            title: isSleepPreventionEnabled ? "Turn Off" : "Turn On",
+            title: isSleepPreventionRequested ? "Turn Off" : "Turn On",
             action: #selector(toggleSleepPrevention),
             keyEquivalent: ""
         )
         toggleItem.target = self
         menu.addItem(toggleItem)
+
+        let codexLimitItem = NSMenuItem(
+            title: "Only While Codex Is Running",
+            action: #selector(toggleCodexRuntimeLimit),
+            keyEquivalent: ""
+        )
+        codexLimitItem.target = self
+        codexLimitItem.state = isCodexRuntimeLimitEnabled ? .on : .off
+        menu.addItem(codexLimitItem)
+
+        if isCodexRuntimeLimitEnabled {
+            let codexStatusItem = NSMenuItem(
+                title: isCodexRunning ? "Codex: Running" : "Codex: Not Running",
+                action: nil,
+                keyEquivalent: ""
+            )
+            codexStatusItem.isEnabled = false
+            menu.addItem(codexStatusItem)
+        }
 
         let settingsItem = NSMenuItem(
             title: "Open App Background Activity Settings",
@@ -495,4 +629,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         return "eye.slash.fill"
     }()
+
+    private static let codexRuntimeLimitEnabledDefaultsKey = "CodexRuntimeLimitEnabled"
 }
