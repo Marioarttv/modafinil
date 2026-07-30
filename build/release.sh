@@ -9,7 +9,8 @@ STAGING_DIR="$DIST_DIR/dmg-staging"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT_DIR/Packaging/Info.plist")"
 DMG_PATH="$DIST_DIR/$APP_NAME-$VERSION.dmg"
 RW_DMG_PATH="$DIST_DIR/$APP_NAME-$VERSION-rw.dmg"
-SIGN_IDENTITY="Developer ID Application: HAMZA QAYYUM (3LF26Z4G2R)"
+SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: HAMZA QAYYUM (3LF26Z4G2R)}"
+export SIGN_IDENTITY
 NOTARY_PROFILE="${NOTARY_PROFILE:-notary-profile}"
 MOUNT_DIR=""
 

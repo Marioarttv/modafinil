@@ -1,8 +1,11 @@
 import AppKit
+import ModafinilRemoteProtocol
 import ServiceManagement
 
 final class AppDelegate: NSObject,
     NSApplicationDelegate,
+    CompanionServerDelegate,
+    CompanionSetupWindowControllerDelegate,
     StatusPopoverViewControllerDelegate,
     StatusWindowControllerDelegate
 {
@@ -10,8 +13,11 @@ final class AppDelegate: NSObject,
     private let helperInstaller = PrivilegedHelperInstaller()
     private let lidMonitor = LidMonitor()
     private let codexRuntimeMonitor = CodexRuntimeMonitor()
+    private let companionConfigurationStore = CompanionConfigurationStore()
     private let statusPopover = NSPopover()
 
+    private var companionServer: CompanionServer?
+    private var companionSetupWindowController: CompanionSetupWindowController?
     private var statusItem: NSStatusItem!
     private var statusPopoverViewController: StatusPopoverViewController?
     private var statusWindowController: StatusWindowController?
@@ -30,6 +36,8 @@ final class AppDelegate: NSObject,
     )
     private var isCodexRunning = false
     private var codexRuntimeTimer: Timer?
+    private var isProvisionalWakeLeaseActive = false
+    private var provisionalWakeLeaseTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("Modafinil applicationDidFinishLaunching")
@@ -53,6 +61,18 @@ final class AppDelegate: NSObject,
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(companionConfigurationDidChange),
+            name: .modafinilCompanionConfigurationDidChange,
+            object: companionConfigurationStore
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(workspaceDidWake),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
 
         do {
             try lidMonitor.start()
@@ -64,8 +84,13 @@ final class AppDelegate: NSObject,
         updateCodexRuntimeMonitoring()
         refreshHelperStatus()
         refreshSleepStatus()
+        startCompanionServer()
         refreshIcon()
         showStatusWindow()
+
+        if companionConfigurationStore.isWakeArmed {
+            activateProvisionalWakeLease()
+        }
     }
 
     func applicationShouldHandleReopen(
@@ -91,9 +116,13 @@ final class AppDelegate: NSObject,
 
     func applicationWillTerminate(_ notification: Notification) {
         NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
         codexRuntimeTimer?.invalidate()
+        provisionalWakeLeaseTimer?.invalidate()
         statusPopover.performClose(nil)
         statusWindowController?.close()
+        companionSetupWindowController?.close()
+        companionServer?.stop()
         helperClient.invalidate()
         lidMonitor.stop()
     }
@@ -103,6 +132,58 @@ final class AppDelegate: NSObject,
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             self?.refreshIcon()
         }
+    }
+
+    private func startCompanionServer() {
+        let server = CompanionServer(secret: companionConfigurationStore.secret)
+        server.delegate = self
+        server.errorHandler = { [weak self] message in
+            self?.lastError = message
+            self?.refreshIcon()
+        }
+
+        do {
+            try server.start()
+            companionServer = server
+        } catch {
+            lastError = "Could not start companion access: \(error.localizedDescription)"
+        }
+    }
+
+    @objc private func companionConfigurationDidChange() {
+        companionServer?.updateSecret(companionConfigurationStore.secret)
+        companionSetupWindowController?.refresh()
+    }
+
+    @objc private func workspaceDidWake() {
+        activateProvisionalWakeLease()
+    }
+
+    private func activateProvisionalWakeLease() {
+        guard companionConfigurationStore.isWakeArmed else { return }
+
+        companionConfigurationStore.isWakeArmed = false
+        isProvisionalWakeLeaseActive = true
+        scheduleProvisionalWakeLeaseExpiration()
+        reconcileSleepPreventionWithCurrentMode()
+    }
+
+    private func scheduleProvisionalWakeLeaseExpiration() {
+        provisionalWakeLeaseTimer?.invalidate()
+        let timer = Timer(timeInterval: 90, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.isProvisionalWakeLeaseActive = false
+            self.provisionalWakeLeaseTimer = nil
+            self.reconcileSleepPreventionWithCurrentMode()
+        }
+        provisionalWakeLeaseTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func cancelProvisionalWakeLease() {
+        provisionalWakeLeaseTimer?.invalidate()
+        provisionalWakeLeaseTimer = nil
+        isProvisionalWakeLeaseActive = false
     }
 
     @objc private func statusItemClicked() {
@@ -124,14 +205,19 @@ final class AppDelegate: NSObject,
 
         lastError = nil
 
-        let nextState = !isSleepPreventionRequested
+        let nextState = !isAwakeRequestedForStatus
 
+        cancelProvisionalWakeLease()
+        companionConfigurationStore.isWakeArmed = false
         isSleepPreventionRequested = nextState
         refreshHelperStatus()
         reconcileSleepPreventionWithCurrentMode()
     }
 
-    private func setSleepPreventionEnabled(_ enabled: Bool) {
+    private func setSleepPreventionEnabled(
+        _ enabled: Bool,
+        completion: ((Result<Void, Error>) -> Void)? = nil
+    ) {
         let previousState = isSleepPreventionEnabled
         isToggleInFlight = true
         sleepStatusGeneration += 1
@@ -155,6 +241,7 @@ final class AppDelegate: NSObject,
 
             self.isToggleInFlight = false
             self.refreshIcon()
+            completion?(result)
 
             if self.needsReconcileAfterToggle {
                 self.needsReconcileAfterToggle = false
@@ -190,11 +277,16 @@ final class AppDelegate: NSObject,
     }
 
     private var shouldEnableSleepPreventionNow: Bool {
-        isSleepPreventionRequested && (!isCodexRuntimeLimitEnabled || isCodexRunning)
+        isProvisionalWakeLeaseActive ||
+            (isSleepPreventionRequested &&
+                (!isCodexRuntimeLimitEnabled || isCodexRunning))
     }
 
     private var isWaitingForCodex: Bool {
-        isSleepPreventionRequested && isCodexRuntimeLimitEnabled && !isCodexRunning
+        !isProvisionalWakeLeaseActive &&
+            isSleepPreventionRequested &&
+            isCodexRuntimeLimitEnabled &&
+            !isCodexRunning
     }
 
     @objc private func installHelper() {
@@ -282,6 +374,38 @@ final class AppDelegate: NSObject,
         helperInstaller.openApprovalSettings()
     }
 
+    @objc private func showCompanionSetup() {
+        statusPopover.performClose(nil)
+
+        let windowController: CompanionSetupWindowController
+        if let existing = companionSetupWindowController {
+            windowController = existing
+            windowController.refresh()
+        } else {
+            windowController = CompanionSetupWindowController(
+                configurationStore: companionConfigurationStore
+            )
+            windowController.setupDelegate = self
+            companionSetupWindowController = windowController
+        }
+
+        NSApp.setActivationPolicy(.regular)
+        windowController.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        windowController.window?.makeKeyAndOrderFront(nil)
+    }
+
+    func companionSetupWindowControllerDidClose(
+        _ windowController: CompanionSetupWindowController
+    ) {
+        guard companionSetupWindowController === windowController else { return }
+        companionSetupWindowController = nil
+
+        if statusWindowController?.window?.isVisible != true {
+            NSApp.setActivationPolicy(.accessory)
+        }
+    }
+
     @objc private func quit() {
         guard !isQuitInProgress else { return }
 
@@ -312,6 +436,8 @@ final class AppDelegate: NSObject,
     }
 
     private func restoreNormalSleepBehavior(completion: @escaping (Result<Void, Error>) -> Void) {
+        cancelProvisionalWakeLease()
+        companionConfigurationStore.isWakeArmed = false
         refreshHelperStatus()
         let localSleepPreventionStatus = readLocalSleepPreventionStatus()
 
@@ -450,7 +576,9 @@ final class AppDelegate: NSObject,
         guard statusWindowController === windowController else { return }
 
         statusWindowController = nil
-        NSApp.setActivationPolicy(.accessory)
+        if companionSetupWindowController?.window?.isVisible != true {
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 
     @objc private func showStatusPopover() {
@@ -493,6 +621,10 @@ final class AppDelegate: NSObject,
         toggleCodexRuntimeLimit()
     }
 
+    func statusPopoverDidOpenCompanionSetup(_ viewController: StatusPopoverViewController) {
+        showCompanionSetup()
+    }
+
     func statusPopoverDidOpenBackgroundSettings(_ viewController: StatusPopoverViewController) {
         openSettings()
     }
@@ -500,6 +632,168 @@ final class AppDelegate: NSObject,
     func statusPopoverDidQuit(_ viewController: StatusPopoverViewController) {
         statusPopover.performClose(nil)
         quit()
+    }
+
+    func companionServerCurrentState(_ server: CompanionServer) -> RemoteState {
+        if !isToggleInFlight,
+           let enabled = readLocalSleepPreventionStatus(),
+           enabled != isSleepPreventionEnabled
+        {
+            isSleepPreventionEnabled = enabled
+            lidMonitor.setEnabled(enabled)
+            refreshIcon()
+        }
+        return makeRemoteState()
+    }
+
+    func companionServer(
+        _ server: CompanionServer,
+        perform command: RemoteCommand,
+        completion: @escaping (Result<(RemoteState, String), Error>) -> Void
+    ) {
+        switch command {
+        case .status:
+            completion(.success((makeRemoteState(), "Status updated.")))
+        case .keepAwake:
+            performRemoteKeepAwake(completion: completion)
+        case .sleep:
+            performRemoteSleep(completion: completion)
+        case .wake:
+            completion(.failure(
+                CompanionRemoteError("Wake requests must be sent to the iPhone relay.")
+            ))
+        }
+    }
+
+    private func performRemoteKeepAwake(
+        completion: @escaping (Result<(RemoteState, String), Error>) -> Void
+    ) {
+        guard !isToggleInFlight else {
+            completion(.failure(
+                CompanionRemoteError("Modafinil is already updating the sleep setting.")
+            ))
+            return
+        }
+
+        refreshHelperStatus()
+        guard helperStatus == .enabled else {
+            completion(.failure(
+                CompanionRemoteError(
+                    "The privileged helper is not enabled. Open Modafinil on the Mac to approve it."
+                )
+            ))
+            return
+        }
+
+        let previousRequestedState = isSleepPreventionRequested
+        let previousCodexLimit = isCodexRuntimeLimitEnabled
+        let previousProvisionalLease = isProvisionalWakeLeaseActive
+
+        companionConfigurationStore.isWakeArmed = false
+        cancelProvisionalWakeLease()
+        isSleepPreventionRequested = true
+
+        if isCodexRuntimeLimitEnabled {
+            isCodexRuntimeLimitEnabled = false
+            UserDefaults.standard.set(
+                false,
+                forKey: Self.codexRuntimeLimitEnabledDefaultsKey
+            )
+            updateCodexRuntimeMonitoring()
+        }
+
+        lastError = nil
+        setSleepPreventionEnabled(true) { [weak self] result in
+            guard let self else { return }
+
+            switch result {
+            case .success:
+                completion(.success((
+                    self.makeRemoteState(),
+                    "Modafinil is keeping the Mac awake."
+                )))
+            case .failure(let error):
+                self.isSleepPreventionRequested = previousRequestedState
+                self.isCodexRuntimeLimitEnabled = previousCodexLimit
+                UserDefaults.standard.set(
+                    previousCodexLimit,
+                    forKey: Self.codexRuntimeLimitEnabledDefaultsKey
+                )
+                self.updateCodexRuntimeMonitoring()
+                if previousProvisionalLease {
+                    self.isProvisionalWakeLeaseActive = true
+                    self.scheduleProvisionalWakeLeaseExpiration()
+                }
+                self.refreshIcon()
+                completion(.failure(error))
+            }
+        }
+    }
+
+    private func performRemoteSleep(
+        completion: @escaping (Result<(RemoteState, String), Error>) -> Void
+    ) {
+        guard !isToggleInFlight else {
+            completion(.failure(
+                CompanionRemoteError("Modafinil is already updating the sleep setting.")
+            ))
+            return
+        }
+
+        refreshHelperStatus()
+        guard helperStatus == .enabled else {
+            completion(.failure(
+                CompanionRemoteError(
+                    "The privileged helper is not enabled. Open Modafinil on the Mac to approve it."
+                )
+            ))
+            return
+        }
+
+        let previousRequestedState = isSleepPreventionRequested
+        let previousProvisionalLease = isProvisionalWakeLeaseActive
+
+        lastError = nil
+        companionConfigurationStore.isWakeArmed = true
+        cancelProvisionalWakeLease()
+        isSleepPreventionRequested = false
+        isToggleInFlight = true
+        sleepStatusGeneration += 1
+        refreshIcon()
+
+        helperClient.sleepAfterDisablingSleepPrevention { [weak self] result in
+            guard let self else { return }
+
+            self.isToggleInFlight = false
+            switch result {
+            case .success:
+                self.isSleepPreventionEnabled = false
+                self.lidMonitor.setEnabled(false)
+                self.refreshIcon()
+                completion(.success((
+                    self.makeRemoteState(),
+                    "Sleep prevention is off. The Mac is going to sleep."
+                )))
+            case .failure(let error):
+                self.companionConfigurationStore.isWakeArmed = false
+                self.isSleepPreventionRequested = previousRequestedState
+                if previousProvisionalLease {
+                    self.isProvisionalWakeLeaseActive = true
+                    self.scheduleProvisionalWakeLeaseExpiration()
+                }
+                self.lastError = error.localizedDescription
+                self.refreshIcon()
+                completion(.failure(error))
+            }
+        }
+    }
+
+    private func makeRemoteState() -> RemoteState {
+        RemoteState(
+            awakeRequested: isAwakeRequestedForStatus,
+            sleepPreventionEffective: isSleepPreventionEnabled,
+            serverName: Host.current().localizedName ?? "Mac"
+        )
     }
 
     private func updateCodexRuntimeMonitoring() {
@@ -665,7 +959,7 @@ final class AppDelegate: NSObject,
         menu.addItem(showStatusItem)
 
         let toggleItem = NSMenuItem(
-            title: isSleepPreventionRequested ? "Turn Off" : "Turn On",
+            title: isAwakeRequestedForStatus ? "Turn Off" : "Turn On",
             action: #selector(toggleSleepPrevention),
             keyEquivalent: ""
         )
@@ -680,6 +974,14 @@ final class AppDelegate: NSObject,
         codexLimitItem.target = self
         codexLimitItem.state = isCodexRuntimeLimitEnabled ? .on : .off
         menu.addItem(codexLimitItem)
+
+        let companionSetupItem = NSMenuItem(
+            title: "Companion Setup…",
+            action: #selector(showCompanionSetup),
+            keyEquivalent: ""
+        )
+        companionSetupItem.target = self
+        menu.addItem(companionSetupItem)
 
         if isCodexRuntimeLimitEnabled {
             let codexStatusItem = NSMenuItem(
@@ -724,12 +1026,12 @@ final class AppDelegate: NSObject,
             symbolColor: statusSymbolColor,
             title: statusTitle,
             explanation: statusExplanation,
-            requestedStatus: isSleepPreventionRequested ? "On" : "Off",
+            requestedStatus: isAwakeRequestedForStatus ? "On" : "Off",
             effectiveStatus: effectiveSleepPreventionStatus,
             codexLimitStatus: isCodexRuntimeLimitEnabled ? "Enabled" : "Disabled",
             codexStatus: isCodexRunning ? "Running" : "Not running",
             helperStatus: helperStatusDescription,
-            primaryActionTitle: isSleepPreventionRequested ? "Turn Off" : "Turn On",
+            primaryActionTitle: isAwakeRequestedForStatus ? "Turn Off" : "Turn On",
             isPrimaryActionEnabled: !isToggleInFlight,
             isCodexRuntimeLimitEnabled: isCodexRuntimeLimitEnabled,
             lastError: lastError
@@ -757,6 +1059,10 @@ final class AppDelegate: NSObject,
             return "Modafinil is asking the privileged helper to update the system sleep setting."
         }
 
+        if isSleepPreventionEnabled, isProvisionalWakeLeaseActive {
+            return "The Mac woke from a companion request. Modafinil is keeping it awake temporarily while the iPhone reconnects."
+        }
+
         if isSleepPreventionEnabled, isCodexRuntimeLimitEnabled {
             return "Codex is running, so Modafinil is keeping your Mac awake. Sleep prevention will turn off when Codex stops."
         }
@@ -774,6 +1080,10 @@ final class AppDelegate: NSObject,
         }
 
         return "Modafinil is off and your Mac is using regular sleep behavior."
+    }
+
+    private var isAwakeRequestedForStatus: Bool {
+        isSleepPreventionRequested || isProvisionalWakeLeaseActive
     }
 
     private var statusSymbolName: String {
@@ -841,6 +1151,16 @@ final class AppDelegate: NSObject,
     }
 
     private struct SleepRestoreError: LocalizedError {
+        let message: String
+
+        init(_ message: String) {
+            self.message = message
+        }
+
+        var errorDescription: String? { message }
+    }
+
+    private struct CompanionRemoteError: LocalizedError {
         let message: String
 
         init(_ message: String) {

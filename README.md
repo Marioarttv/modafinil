@@ -28,4 +28,22 @@ Opening Modafinil from Launchpad or Finder shows the same controls in a regular 
 
 The menu also includes an "Only While Codex Is Running" option. When enabled, Modafinil keeps sleep prevention requested but only applies it while a Codex app or `codex` command is running.
 
+## iPhone companion access
+
+Open Modafinil from Launchpad and choose **Companion Setup…** to pair the iPhone companion app. Modafinil discovers the Mac's Tailscale IPv4 address and current Wi-Fi MAC address, lets you enter the XR wake relay address and up to four comma-separated wake MAC addresses, and creates a private pairing QR code.
+
+The Mac listener is event-driven and listens on TCP port `48765`. It accepts only loopback and Tailscale source addresses. Every request and response is authenticated with a locally generated 256-bit secret; requests also require a current timestamp and a unique UUID to prevent replay. The root helper is never exposed to the network.
+
+A companion sleep request first arms a one-time wake lease, disables Modafinil, and receives an acknowledgement from the signed local helper. The helper then puts the Mac to sleep after a short delay so the network response can finish. When macOS posts its wake notification, Modafinil enables a 90-second provisional wake lease while the iPhone reconnects and confirms **Keep Awake**.
+
+The pairing secret is stored only in the current macOS user's preferences. Generating a new secret invalidates all previous pairings.
+
+For a local signed build, `build/build.sh` keeps the release identity as its default but accepts an override:
+
+```sh
+SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./build/build.sh
+```
+
+The helper derives its own signing team at runtime and accepts only the Modafinil app identifier signed by that same team.
+
 Tested thus far only on Apple Silicon with macOS 13+.

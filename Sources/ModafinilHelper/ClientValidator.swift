@@ -4,9 +4,17 @@ import ModafinilShared
 
 enum ClientValidator {
     private static let appRequirement: SecRequirement? = {
+        guard let teamIdentifier = helperTeamIdentifier() else {
+            NSLog("ModafinilHelper could not determine its own signing team")
+            return nil
+        }
+
+        let requirementText = """
+        anchor apple generic and identifier "\(ModafinilConstants.appBundleIdentifier)" and certificate leaf[subject.OU] = "\(teamIdentifier)"
+        """
         var requirement: SecRequirement?
         let status = SecRequirementCreateWithString(
-            ModafinilConstants.appSigningRequirement as CFString,
+            requirementText as CFString,
             SecCSFlags(),
             &requirement
         )
@@ -18,6 +26,41 @@ enum ClientValidator {
 
         return requirement
     }()
+
+    private static func helperTeamIdentifier() -> String? {
+        var helperCode: SecCode?
+        guard SecCodeCopySelf(SecCSFlags(), &helperCode) == errSecSuccess,
+              let helperCode
+        else {
+            return nil
+        }
+
+        var helperStaticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(
+            helperCode,
+            SecCSFlags(),
+            &helperStaticCode
+        ) == errSecSuccess,
+            let helperStaticCode
+        else {
+            return nil
+        }
+
+        var signingInformation: CFDictionary?
+        guard SecCodeCopySigningInformation(
+            helperStaticCode,
+            SecCSFlags(rawValue: kSecCSSigningInformation),
+            &signingInformation
+        ) == errSecSuccess,
+            let information = signingInformation as? [CFString: Any],
+            let teamIdentifier = information[kSecCodeInfoTeamIdentifier] as? String,
+            !teamIdentifier.isEmpty
+        else {
+            return nil
+        }
+
+        return teamIdentifier
+    }
 
     static func allows(processIdentifier pid: pid_t) -> Bool {
         var guest: SecCode?

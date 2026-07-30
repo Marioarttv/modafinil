@@ -14,13 +14,21 @@ let package = Package(
         .target(
             name: "ModafinilShared"
         ),
+        .target(
+            name: "ModafinilRemoteProtocol",
+            linkerSettings: [
+                .linkedFramework("Security")
+            ]
+        ),
         .executableTarget(
             name: "Modafinil",
-            dependencies: ["ModafinilShared"],
+            dependencies: ["ModafinilShared", "ModafinilRemoteProtocol"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
+                .linkedFramework("CoreImage"),
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("IOKit"),
+                .linkedFramework("Network"),
                 .linkedFramework("ServiceManagement")
             ]
         ),
@@ -30,6 +38,10 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("Security")
             ]
+        ),
+        .testTarget(
+            name: "ModafinilRemoteProtocolTests",
+            dependencies: ["ModafinilRemoteProtocol"]
         )
     ]
 )

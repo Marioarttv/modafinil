@@ -3,6 +3,7 @@ import AppKit
 protocol StatusPopoverViewControllerDelegate: AnyObject {
     func statusPopoverDidToggleSleepPrevention(_ viewController: StatusPopoverViewController)
     func statusPopoverDidToggleCodexRuntimeLimit(_ viewController: StatusPopoverViewController)
+    func statusPopoverDidOpenCompanionSetup(_ viewController: StatusPopoverViewController)
     func statusPopoverDidOpenBackgroundSettings(_ viewController: StatusPopoverViewController)
     func statusPopoverDidQuit(_ viewController: StatusPopoverViewController)
 }
@@ -66,6 +67,11 @@ final class StatusPopoverViewController: NSViewController {
         action: nil
     )
     private let settingsButton = NSButton(title: "Background Activity Settings", target: nil, action: nil)
+    private let companionSetupButton = NSButton(
+        title: "Companion Setup…",
+        target: nil,
+        action: nil
+    )
     private let quitButton = NSButton(title: "Quit Modafinil", target: nil, action: nil)
 
     init(presentation: Presentation = .popover) {
@@ -144,6 +150,10 @@ final class StatusPopoverViewController: NSViewController {
         settingsButton.action = #selector(settingsButtonClicked)
         settingsButton.bezelStyle = .rounded
 
+        companionSetupButton.target = self
+        companionSetupButton.action = #selector(companionSetupButtonClicked)
+        companionSetupButton.bezelStyle = .rounded
+
         quitButton.target = self
         quitButton.action = #selector(quitButtonClicked)
         quitButton.bezelStyle = .rounded
@@ -155,6 +165,7 @@ final class StatusPopoverViewController: NSViewController {
         actionStack.spacing = 8
         actionStack.addArrangedSubview(primaryButton)
         actionStack.addArrangedSubview(codexLimitButton)
+        actionStack.addArrangedSubview(companionSetupButton)
 
         let secondaryActionStack = NSStackView()
         secondaryActionStack.orientation = .horizontal
@@ -262,6 +273,10 @@ final class StatusPopoverViewController: NSViewController {
 
     @objc private func settingsButtonClicked() {
         delegate?.statusPopoverDidOpenBackgroundSettings(self)
+    }
+
+    @objc private func companionSetupButtonClicked() {
+        delegate?.statusPopoverDidOpenCompanionSetup(self)
     }
 
     @objc private func quitButtonClicked() {

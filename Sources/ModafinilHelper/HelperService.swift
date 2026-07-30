@@ -5,9 +5,11 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
     private let listener = NSXPCListener(machServiceName: ModafinilConstants.helperMachServiceName)
     private let stateQueue = DispatchQueue(label: "com.narcotic.modafinil.helper.state")
     private let idleExitDelay: TimeInterval = 15
+    private let remoteSleepDelay: TimeInterval = 2
     private var connectedSessionIDs = Set<UUID>()
     private var activeLeaseIDs = Set<UUID>()
     private var idleExitWorkItem: DispatchWorkItem?
+    private var pendingRemoteSleepWorkItem: DispatchWorkItem?
     private let ownershipMarkerURL = URL(
         fileURLWithPath: "/Library/Application Support/Modafinil/sleep-prevention.enabled"
     )
@@ -52,6 +54,8 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         withReply reply: @escaping (Bool, String?) -> Void
     ) {
         stateQueue.async {
+            self.cancelPendingRemoteSleep()
+
             do {
                 if enabled {
                     do {
@@ -84,6 +88,37 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
                 reply(true, enabled, nil)
             } catch {
                 reply(false, false, error.localizedDescription)
+            }
+        }
+    }
+
+    fileprivate func sleepAfterDisablingSleepPrevention(
+        withReply reply: @escaping (Bool, String?) -> Void
+    ) {
+        stateQueue.async {
+            do {
+                self.cancelPendingRemoteSleep()
+                try self.setSystemSleepPreventionEnabled(false)
+                self.activeLeaseIDs.removeAll()
+                self.removeOwnershipMarker()
+
+                let workItem = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    self.pendingRemoteSleepWorkItem = nil
+                    do {
+                        try self.runSystemSleepNow()
+                    } catch {
+                        NSLog("ModafinilHelper could not put the Mac to sleep: \(error.localizedDescription)")
+                    }
+                }
+                self.pendingRemoteSleepWorkItem = workItem
+                self.stateQueue.asyncAfter(
+                    deadline: .now() + self.remoteSleepDelay,
+                    execute: workItem
+                )
+                reply(true, nil)
+            } catch {
+                reply(false, error.localizedDescription)
             }
         }
     }
@@ -164,6 +199,15 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         try Shell.run("/usr/bin/pmset", ["-a", "disablesleep", enabled ? "1" : "0"])
     }
 
+    private func runSystemSleepNow() throws {
+        try Shell.run("/usr/bin/pmset", ["sleepnow"])
+    }
+
+    private func cancelPendingRemoteSleep() {
+        pendingRemoteSleepWorkItem?.cancel()
+        pendingRemoteSleepWorkItem = nil
+    }
+
     private func readSleepPreventionStatus() throws -> Bool {
         let output = try Shell.run("/usr/bin/pmset", ["-g"])
         return output
@@ -222,5 +266,16 @@ private final class HelperSession: NSObject, ModafinilHelperProtocol {
         }
 
         service.getSleepPreventionStatus(withReply: reply)
+    }
+
+    func sleepAfterDisablingSleepPrevention(
+        withReply reply: @escaping (Bool, String?) -> Void
+    ) {
+        guard let service else {
+            reply(false, "The helper service is unavailable.")
+            return
+        }
+
+        service.sleepAfterDisablingSleepPrevention(withReply: reply)
     }
 }

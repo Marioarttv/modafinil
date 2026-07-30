@@ -74,6 +74,40 @@ final class PrivilegedHelperClient {
         }
     }
 
+    func sleepAfterDisablingSleepPrevention(
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        var didComplete = false
+        let finish: (Result<Void, Error>) -> Void = { result in
+            DispatchQueue.main.async {
+                guard !didComplete else { return }
+                didComplete = true
+                completion(result)
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + requestTimeout) { [weak self] in
+            guard !didComplete else { return }
+            self?.invalidate()
+            finish(.failure(HelperError("The helper did not respond.")))
+        }
+
+        remoteProxy { proxyResult in
+            switch proxyResult {
+            case .failure(let error):
+                finish(.failure(error))
+            case .success(let proxy):
+                proxy.sleepAfterDisablingSleepPrevention { success, message in
+                    if success {
+                        finish(.success(()))
+                    } else {
+                        finish(.failure(HelperError(message ?? "The helper could not put the Mac to sleep.")))
+                    }
+                }
+            }
+        }
+    }
+
     func invalidate() {
         connection?.invalidate()
         connection = nil

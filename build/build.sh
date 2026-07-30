@@ -3,7 +3,7 @@ set -eu
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIGURATION="release"
-SIGN_IDENTITY="Developer ID Application: HAMZA QAYYUM (3LF26Z4G2R)"
+SIGN_IDENTITY="${SIGN_IDENTITY:-Developer ID Application: HAMZA QAYYUM (3LF26Z4G2R)}"
 BUILD_DIR="$ROOT_DIR/.build/$CONFIGURATION"
 DIST_DIR="$ROOT_DIR/dist"
 APP_PATH="$DIST_DIR/Modafinil.app"

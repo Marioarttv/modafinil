@@ -12,4 +12,9 @@ public protocol ModafinilHelperProtocol {
     func getSleepPreventionStatus(
         withReply reply: @escaping (Bool, Bool, String?) -> Void
     )
+
+    @objc(sleepAfterDisablingSleepPreventionWithReply:)
+    func sleepAfterDisablingSleepPrevention(
+        withReply reply: @escaping (Bool, String?) -> Void
+    )
 }
