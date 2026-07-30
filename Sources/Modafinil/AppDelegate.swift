@@ -1,7 +1,11 @@
 import AppKit
 import ServiceManagement
 
-final class AppDelegate: NSObject, NSApplicationDelegate, StatusPopoverViewControllerDelegate {
+final class AppDelegate: NSObject,
+    NSApplicationDelegate,
+    StatusPopoverViewControllerDelegate,
+    StatusWindowControllerDelegate
+{
     private let helperClient = PrivilegedHelperClient()
     private let helperInstaller = PrivilegedHelperInstaller()
     private let lidMonitor = LidMonitor()
@@ -10,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusPopoverViewContr
 
     private var statusItem: NSStatusItem!
     private var statusPopoverViewController: StatusPopoverViewController?
+    private var statusWindowController: StatusWindowController?
     private var isSleepPreventionEnabled = false
     private var isSleepPreventionRequested = false
     private var hasLoadedInitialSleepRequest = false
@@ -56,10 +61,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusPopoverViewContr
         }
 
         refreshCodexRuntimeState(shouldReconcile: false)
-        startCodexRuntimeMonitoring()
+        updateCodexRuntimeMonitoring()
         refreshHelperStatus()
         refreshSleepStatus()
         refreshIcon()
+        showStatusWindow()
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        showStatusWindow()
+        return true
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -79,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusPopoverViewContr
         NotificationCenter.default.removeObserver(self)
         codexRuntimeTimer?.invalidate()
         statusPopover.performClose(nil)
+        statusWindowController?.close()
         helperClient.invalidate()
         lidMonitor.stop()
     }
@@ -404,6 +419,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusPopoverViewContr
     private func setControlsEnabled(_ enabled: Bool) {
         statusItem?.button?.isEnabled = enabled
         statusPopoverViewController?.view.window?.ignoresMouseEvents = !enabled
+        statusWindowController?.window?.ignoresMouseEvents = !enabled
+    }
+
+    @objc private func showStatusWindow() {
+        refreshHelperStatus()
+        refreshCodexRuntimeState(shouldReconcile: false)
+        statusPopover.performClose(nil)
+
+        let windowController: StatusWindowController
+        if let existingWindowController = statusWindowController {
+            windowController = existingWindowController
+        } else {
+            let viewController = StatusPopoverViewController(presentation: .window)
+            viewController.delegate = self
+
+            windowController = StatusWindowController(statusViewController: viewController)
+            windowController.statusWindowDelegate = self
+            statusWindowController = windowController
+        }
+
+        windowController.update(with: makeStatusViewModel())
+        NSApp.setActivationPolicy(.regular)
+        windowController.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        windowController.window?.makeKeyAndOrderFront(nil)
+    }
+
+    func statusWindowControllerDidClose(_ windowController: StatusWindowController) {
+        guard statusWindowController === windowController else { return }
+
+        statusWindowController = nil
+        NSApp.setActivationPolicy(.accessory)
     }
 
     @objc private func showStatusPopover() {
@@ -433,6 +480,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusPopoverViewContr
         statusPopoverViewController?.update(with: makeStatusViewModel())
     }
 
+    private func refreshStatusWindow() {
+        guard statusWindowController?.window?.isVisible == true else { return }
+        statusWindowController?.update(with: makeStatusViewModel())
+    }
+
     func statusPopoverDidToggleSleepPrevention(_ viewController: StatusPopoverViewController) {
         toggleSleepPrevention()
     }
@@ -450,8 +502,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusPopoverViewContr
         quit()
     }
 
-    private func startCodexRuntimeMonitoring() {
+    private func updateCodexRuntimeMonitoring() {
         codexRuntimeTimer?.invalidate()
+        codexRuntimeTimer = nil
+
+        guard isCodexRuntimeLimitEnabled else { return }
 
         let timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
             self?.refreshCodexRuntimeState()
@@ -484,6 +539,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusPopoverViewContr
             forKey: Self.codexRuntimeLimitEnabledDefaultsKey
         )
 
+        updateCodexRuntimeMonitoring()
         refreshCodexRuntimeState(shouldReconcile: false)
         reconcileSleepPreventionWithCurrentMode()
     }
@@ -572,6 +628,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusPopoverViewContr
         }
 
         refreshStatusPopover()
+        refreshStatusWindow()
     }
 
     private func showMenu() {
@@ -600,8 +657,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, StatusPopoverViewContr
         menu.addItem(.separator())
 
         let showStatusItem = NSMenuItem(
-            title: "Show Status",
-            action: #selector(showStatusPopover),
+            title: "Open Modafinil",
+            action: #selector(showStatusWindow),
             keyEquivalent: ""
         )
         showStatusItem.target = self

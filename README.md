@@ -24,6 +24,8 @@ Requires App Background Activity permission (`System Settings -> General -> Logi
 
 Left click to open the status window, where you can see why Modafinil is active, inactive, or waiting, and activate/deactivate it. Right click for menu, where you can quit the app and also uninstall it.
 
+Opening Modafinil from Launchpad or Finder shows the same controls in a regular app window, even when the menu bar icon is hidden because the menu bar is full. Closing that window returns Modafinil to its lightweight menu bar mode.
+
 The menu also includes an "Only While Codex Is Running" option. When enabled, Modafinil keeps sleep prevention requested but only applies it while a Codex app or `codex` command is running.
 
 Tested thus far only on Apple Silicon with macOS 13+.

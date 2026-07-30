@@ -8,6 +8,29 @@ protocol StatusPopoverViewControllerDelegate: AnyObject {
 }
 
 final class StatusPopoverViewController: NSViewController {
+    enum Presentation {
+        case popover
+        case window
+
+        var width: CGFloat {
+            switch self {
+            case .popover:
+                return 360
+            case .window:
+                return 440
+            }
+        }
+
+        var contentInset: CGFloat {
+            switch self {
+            case .popover:
+                return 16
+            case .window:
+                return 24
+            }
+        }
+    }
+
     struct ViewModel {
         let symbolName: String
         let symbolColor: NSColor
@@ -26,6 +49,7 @@ final class StatusPopoverViewController: NSViewController {
 
     weak var delegate: StatusPopoverViewControllerDelegate?
 
+    private let presentation: Presentation
     private let symbolImageView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let explanationLabel = NSTextField(labelWithString: "")
@@ -44,8 +68,18 @@ final class StatusPopoverViewController: NSViewController {
     private let settingsButton = NSButton(title: "Background Activity Settings", target: nil, action: nil)
     private let quitButton = NSButton(title: "Quit Modafinil", target: nil, action: nil)
 
+    init(presentation: Presentation = .popover) {
+        self.presentation = presentation
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) {
+        presentation = .popover
+        super.init(coder: coder)
+    }
+
     override func loadView() {
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 320))
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: presentation.width, height: 320))
         self.view = view
 
         let contentStack = NSStackView()
@@ -57,10 +91,10 @@ final class StatusPopoverViewController: NSViewController {
         view.addSubview(contentStack)
 
         NSLayoutConstraint.activate([
-            contentStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            contentStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            contentStack.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
-            contentStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16)
+            contentStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: presentation.contentInset),
+            contentStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -presentation.contentInset),
+            contentStack.topAnchor.constraint(equalTo: view.topAnchor, constant: presentation.contentInset),
+            contentStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -presentation.contentInset)
         ])
 
         contentStack.addArrangedSubview(makeHeaderView())
@@ -69,7 +103,7 @@ final class StatusPopoverViewController: NSViewController {
         explanationLabel.textColor = .secondaryLabelColor
         explanationLabel.lineBreakMode = .byWordWrapping
         explanationLabel.maximumNumberOfLines = 0
-        explanationLabel.preferredMaxLayoutWidth = 328
+        explanationLabel.preferredMaxLayoutWidth = presentation.width - (presentation.contentInset * 2)
         contentStack.addArrangedSubview(explanationLabel)
 
         contentStack.addArrangedSubview(makeSeparator())
@@ -90,7 +124,7 @@ final class StatusPopoverViewController: NSViewController {
         errorLabel.textColor = .systemRed
         errorLabel.lineBreakMode = .byWordWrapping
         errorLabel.maximumNumberOfLines = 0
-        errorLabel.preferredMaxLayoutWidth = 328
+        errorLabel.preferredMaxLayoutWidth = presentation.width - (presentation.contentInset * 2)
         contentStack.addArrangedSubview(errorLabel)
 
         contentStack.addArrangedSubview(makeSeparator())
@@ -99,6 +133,9 @@ final class StatusPopoverViewController: NSViewController {
         primaryButton.action = #selector(primaryButtonClicked)
         primaryButton.bezelStyle = .rounded
         primaryButton.keyEquivalent = "\r"
+        if presentation == .window {
+            primaryButton.controlSize = .large
+        }
 
         codexLimitButton.target = self
         codexLimitButton.action = #selector(codexLimitButtonClicked)
@@ -160,7 +197,10 @@ final class StatusPopoverViewController: NSViewController {
 
         view.needsLayout = true
         view.layoutSubtreeIfNeeded()
-        preferredContentSize = NSSize(width: 360, height: max(260, view.fittingSize.height))
+        preferredContentSize = NSSize(
+            width: presentation.width,
+            height: max(260, view.fittingSize.height)
+        )
     }
 
     private func makeHeaderView() -> NSView {
