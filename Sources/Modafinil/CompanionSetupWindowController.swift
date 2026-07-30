@@ -12,13 +12,14 @@ final class CompanionSetupWindowController: NSWindowController, NSWindowDelegate
     weak var setupDelegate: CompanionSetupWindowControllerDelegate?
 
     init(configurationStore: CompanionConfigurationStore) {
+        let windowSize = NSSize(width: 700, height: 400)
         let viewController = CompanionSetupViewController(
             configurationStore: configurationStore
         )
         let window = NSWindow(
             contentRect: NSRect(
                 origin: .zero,
-                size: NSSize(width: 560, height: 760)
+                size: windowSize
             ),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
@@ -28,14 +29,13 @@ final class CompanionSetupWindowController: NSWindowController, NSWindowDelegate
         window.contentViewController = viewController
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
-        window.setFrameAutosaveName("ModafinilCompanionSetupWindow")
+        window.contentMinSize = windowSize
+        window.contentMaxSize = windowSize
 
         super.init(window: window)
 
         window.delegate = self
-        if !window.setFrameUsingName("ModafinilCompanionSetupWindow") {
-            window.center()
-        }
+        window.center()
     }
 
     required init?(coder: NSCoder) {
@@ -59,8 +59,8 @@ private final class CompanionSetupViewController: NSViewController {
     private let relayHostField = NSTextField()
     private let relayPortField = NSTextField()
     private let targetMACsField = NSTextField()
-    private let pairingLinkField = NSTextField()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
+    private var pairingLink: String?
     private let copyButton = NSButton(
         title: "Copy Pairing Link",
         target: nil,
@@ -79,7 +79,7 @@ private final class CompanionSetupViewController: NSViewController {
 
     override func loadView() {
         let view = NSView(
-            frame: NSRect(origin: .zero, size: NSSize(width: 560, height: 720))
+            frame: NSRect(origin: .zero, size: NSSize(width: 700, height: 400))
         )
         self.view = view
 
@@ -88,61 +88,68 @@ private final class CompanionSetupViewController: NSViewController {
         content.orientation = .vertical
         content.alignment = .leading
         content.distribution = .fill
-        content.spacing = 14
+        content.spacing = 12
         view.addSubview(content)
 
         NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 28),
-            content.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -28),
-            content.topAnchor.constraint(equalTo: view.topAnchor, constant: 24),
-            content.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -24)
+            content.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
+            content.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -24),
+            content.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
+            content.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -20)
         ])
 
         let title = NSTextField(labelWithString: "Pair an iPhone")
-        title.font = .systemFont(ofSize: 22, weight: .bold)
+        title.font = .systemFont(ofSize: 20, weight: .bold)
         content.addArrangedSubview(title)
 
         let explanation = NSTextField(
             wrappingLabelWithString: """
-            Enter the jailbroken XR's Tailscale address, then scan this private QR code in the companion app. Commands are accepted only from Tailscale or this Mac and are authenticated with the secret embedded in the code.
+            Configure the XR wake relay, then scan the private QR code in Modafinil Companion on your iPhone.
             """
         )
         explanation.textColor = .secondaryLabelColor
         explanation.maximumNumberOfLines = 0
-        explanation.preferredMaxLayoutWidth = 504
+        explanation.preferredMaxLayoutWidth = 652
         content.addArrangedSubview(explanation)
 
         content.addArrangedSubview(makeSeparator())
-        content.addArrangedSubview(
+
+        let form = NSStackView()
+        form.orientation = .vertical
+        form.alignment = .leading
+        form.distribution = .fill
+        form.spacing = 10
+
+        form.addArrangedSubview(
             makeRow(title: "Mac Tailscale IP", field: macHostField)
         )
         macHostField.isEditable = false
         macHostField.isSelectable = true
 
-        content.addArrangedSubview(
+        form.addArrangedSubview(
             makeRow(title: "XR Tailscale host", field: relayHostField)
         )
         relayHostField.placeholderString = "100.x.y.z or MagicDNS name"
 
-        content.addArrangedSubview(
+        form.addArrangedSubview(
             makeRow(title: "XR relay port", field: relayPortField)
         )
 
-        content.addArrangedSubview(
+        form.addArrangedSubview(
             makeRow(title: "Wake MAC address(es)", field: targetMACsField)
         )
         targetMACsField.placeholderString = "aa:bb:cc:dd:ee:ff"
 
         let macHint = NSTextField(
             wrappingLabelWithString: """
-            Prefilled from the active Wi-Fi interface. You can enter 1–4 comma-separated MAC addresses when macOS uses different private addresses.
+            Prefilled from Wi-Fi. Enter up to four comma-separated addresses if macOS uses private addresses.
             """
         )
         macHint.font = .systemFont(ofSize: 11)
         macHint.textColor = .secondaryLabelColor
         macHint.maximumNumberOfLines = 0
-        macHint.preferredMaxLayoutWidth = 504
-        content.addArrangedSubview(macHint)
+        macHint.preferredMaxLayoutWidth = 410
+        form.addArrangedSubview(macHint)
 
         let saveButton = NSButton(
             title: "Save and Refresh QR",
@@ -161,42 +168,54 @@ private final class CompanionSetupViewController: NSViewController {
         let editActions = NSStackView(views: [saveButton, resetButton])
         editActions.orientation = .horizontal
         editActions.spacing = 8
-        content.addArrangedSubview(editActions)
+        form.addArrangedSubview(editActions)
 
-        content.addArrangedSubview(makeSeparator())
+        statusLabel.font = .systemFont(ofSize: 12)
+        statusLabel.maximumNumberOfLines = 0
+        statusLabel.preferredMaxLayoutWidth = 410
+        form.addArrangedSubview(statusLabel)
+
+        let qrTitle = NSTextField(labelWithString: "Scan on iPhone")
+        qrTitle.font = .systemFont(ofSize: 13, weight: .semibold)
 
         qrImageView.imageScaling = .scaleProportionallyUpOrDown
         qrImageView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            qrImageView.widthAnchor.constraint(equalToConstant: 220),
-            qrImageView.heightAnchor.constraint(equalToConstant: 220)
+            qrImageView.widthAnchor.constraint(equalToConstant: 188),
+            qrImageView.heightAnchor.constraint(equalToConstant: 188)
         ])
-
-        let qrContainer = NSStackView()
-        qrContainer.orientation = .horizontal
-        qrContainer.alignment = .centerY
-        qrContainer.distribution = .fill
-        qrContainer.addArrangedSubview(NSView())
-        qrContainer.addArrangedSubview(qrImageView)
-        qrContainer.addArrangedSubview(NSView())
-        content.addArrangedSubview(qrContainer)
-        qrContainer.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
-
-        pairingLinkField.isEditable = false
-        pairingLinkField.isSelectable = true
-        pairingLinkField.lineBreakMode = .byTruncatingMiddle
-        content.addArrangedSubview(pairingLinkField)
-        pairingLinkField.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
 
         copyButton.target = self
         copyButton.action = #selector(copyPairingLink)
         copyButton.bezelStyle = .rounded
-        content.addArrangedSubview(copyButton)
 
-        statusLabel.font = .systemFont(ofSize: 12)
-        statusLabel.maximumNumberOfLines = 0
-        statusLabel.preferredMaxLayoutWidth = 504
-        content.addArrangedSubview(statusLabel)
+        let qrHint = NSTextField(
+            wrappingLabelWithString: "The QR code and copied link contain your private pairing secret."
+        )
+        qrHint.font = .systemFont(ofSize: 10)
+        qrHint.textColor = .secondaryLabelColor
+        qrHint.maximumNumberOfLines = 0
+        qrHint.alignment = .center
+        qrHint.preferredMaxLayoutWidth = 188
+
+        let qrColumn = NSStackView(views: [qrTitle, qrImageView, copyButton, qrHint])
+        qrColumn.orientation = .vertical
+        qrColumn.alignment = .centerX
+        qrColumn.distribution = .fill
+        qrColumn.spacing = 9
+
+        let body = NSStackView(views: [form, qrColumn])
+        body.orientation = .horizontal
+        body.alignment = .top
+        body.distribution = .fill
+        body.spacing = 24
+        content.addArrangedSubview(body)
+
+        NSLayoutConstraint.activate([
+            body.widthAnchor.constraint(equalTo: content.widthAnchor),
+            form.widthAnchor.constraint(equalToConstant: 440),
+            qrColumn.widthAnchor.constraint(equalToConstant: 188)
+        ])
 
         refresh()
     }
@@ -216,14 +235,14 @@ private final class CompanionSetupViewController: NSViewController {
     private func makeRow(title: String, field: NSTextField) -> NSView {
         let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 12, weight: .medium)
-        label.widthAnchor.constraint(equalToConstant: 148).isActive = true
+        label.widthAnchor.constraint(equalToConstant: 132).isActive = true
 
         let row = NSStackView(views: [label, field])
         row.orientation = .horizontal
         row.alignment = .firstBaseline
         row.distribution = .fill
         row.spacing = 10
-        field.widthAnchor.constraint(greaterThanOrEqualToConstant: 300).isActive = true
+        field.widthAnchor.constraint(equalToConstant: 298).isActive = true
         return row
     }
 
@@ -276,11 +295,10 @@ private final class CompanionSetupViewController: NSViewController {
     }
 
     @objc private func copyPairingLink() {
-        let value = pairingLinkField.stringValue
-        guard !value.isEmpty else { return }
+        guard let pairingLink else { return }
 
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(value, forType: .string)
+        NSPasteboard.general.setString(pairingLink, forType: .string)
         statusLabel.textColor = .systemGreen
         statusLabel.stringValue = "Private pairing link copied."
     }
@@ -292,7 +310,7 @@ private final class CompanionSetupViewController: NSViewController {
             targetMACsAreValid
 
         guard isComplete else {
-            pairingLinkField.stringValue = ""
+            pairingLink = nil
             qrImageView.image = NSImage(
                 systemSymbolName: "qrcode",
                 accessibilityDescription: "Pairing QR code unavailable"
@@ -316,7 +334,7 @@ private final class CompanionSetupViewController: NSViewController {
         }
 
         let link = configuration.pairingURL.absoluteString
-        pairingLinkField.stringValue = link
+        pairingLink = link
         qrImageView.image = makeQRCode(from: link)
         qrImageView.contentTintColor = nil
         copyButton.isEnabled = true
