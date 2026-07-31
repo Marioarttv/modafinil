@@ -11,6 +11,7 @@ public struct PairingConfiguration: Codable, Equatable, Sendable {
     public let relayPort: UInt16
     public let targetMAC: String
     public let secret: Data
+    public let relaySecret: Data
 
     public init(
         displayName: String,
@@ -19,7 +20,8 @@ public struct PairingConfiguration: Codable, Equatable, Sendable {
         relayHost: String,
         relayPort: UInt16 = 48_766,
         targetMAC: String,
-        secret: Data
+        secret: Data,
+        relaySecret: Data
     ) {
         self.displayName = displayName
         self.macHost = macHost
@@ -28,6 +30,7 @@ public struct PairingConfiguration: Codable, Equatable, Sendable {
         self.relayPort = relayPort
         self.targetMAC = targetMAC
         self.secret = secret
+        self.relaySecret = relaySecret
     }
 
     public init(pairingURL: URL) throws {
@@ -48,7 +51,7 @@ public struct PairingConfiguration: Codable, Equatable, Sendable {
         }
 
         guard
-            values["v"] == "1",
+            values["v"] == "2",
             let displayName = values["name"],
             let macHost = values["macHost"],
             let macPortText = values["macPort"],
@@ -59,7 +62,10 @@ public struct PairingConfiguration: Codable, Equatable, Sendable {
             let targetMAC = values["targetMAC"],
             let secretText = values["secret"],
             let secret = Data(base64Encoded: secretText),
-            secret.count == 32
+            secret.count == 32,
+            let relaySecretText = values["relaySecret"],
+            let relaySecret = Data(base64Encoded: relaySecretText),
+            relaySecret.count == 32
         else {
             throw PairingError.missingConfiguration
         }
@@ -71,7 +77,8 @@ public struct PairingConfiguration: Codable, Equatable, Sendable {
             relayHost: relayHost,
             relayPort: relayPort,
             targetMAC: targetMAC,
-            secret: secret
+            secret: secret,
+            relaySecret: relaySecret
         )
     }
 
@@ -80,14 +87,15 @@ public struct PairingConfiguration: Codable, Equatable, Sendable {
         components.scheme = Self.scheme
         components.host = Self.host
         components.queryItems = [
-            URLQueryItem(name: "v", value: "1"),
+            URLQueryItem(name: "v", value: "2"),
             URLQueryItem(name: "name", value: displayName),
             URLQueryItem(name: "macHost", value: macHost),
             URLQueryItem(name: "macPort", value: String(macPort)),
             URLQueryItem(name: "relayHost", value: relayHost),
             URLQueryItem(name: "relayPort", value: String(relayPort)),
             URLQueryItem(name: "targetMAC", value: targetMAC),
-            URLQueryItem(name: "secret", value: secret.base64EncodedString())
+            URLQueryItem(name: "secret", value: secret.base64EncodedString()),
+            URLQueryItem(name: "relaySecret", value: relaySecret.base64EncodedString())
         ]
         return components.url!
     }

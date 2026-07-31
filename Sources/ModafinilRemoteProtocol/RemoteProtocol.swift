@@ -6,6 +6,8 @@ public enum RemoteCommand: String, Codable, Sendable {
     case status
     case keepAwake
     case sleep
+    case scheduleSleep
+    case cancelScheduledSleep
     case wake
 }
 
@@ -13,15 +15,18 @@ public struct RemoteState: Codable, Equatable, Sendable {
     public let awakeRequested: Bool
     public let sleepPreventionEffective: Bool
     public let serverName: String
+    public let scheduledSleepAt: Int64?
 
     public init(
         awakeRequested: Bool,
         sleepPreventionEffective: Bool,
-        serverName: String
+        serverName: String,
+        scheduledSleepAt: Int64? = nil
     ) {
         self.awakeRequested = awakeRequested
         self.sleepPreventionEffective = sleepPreventionEffective
         self.serverName = serverName
+        self.scheduledSleepAt = scheduledSleepAt
     }
 }
 
@@ -165,7 +170,8 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
             statePayload = [
                 state.awakeRequested ? "1" : "0",
                 state.sleepPreventionEffective ? "1" : "0",
-                state.serverName
+                state.serverName,
+                state.scheduledSleepAt.map(String.init) ?? ""
             ].joined(separator: "\u{1f}")
         } else {
             statePayload = ""

@@ -38,6 +38,8 @@ final class AppDelegate: NSObject,
     private var codexRuntimeTimer: Timer?
     private var isProvisionalWakeLeaseActive = false
     private var provisionalWakeLeaseTimer: Timer?
+    private var scheduledSleepTimer: Timer?
+    private var scheduledSleepDate: Date?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("Modafinil applicationDidFinishLaunching")
@@ -119,6 +121,7 @@ final class AppDelegate: NSObject,
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         codexRuntimeTimer?.invalidate()
         provisionalWakeLeaseTimer?.invalidate()
+        scheduledSleepTimer?.invalidate()
         statusPopover.performClose(nil)
         statusWindowController?.close()
         companionSetupWindowController?.close()
@@ -436,6 +439,7 @@ final class AppDelegate: NSObject,
     }
 
     private func restoreNormalSleepBehavior(completion: @escaping (Result<Void, Error>) -> Void) {
+        cancelScheduledSleep()
         cancelProvisionalWakeLease()
         companionConfigurationStore.isWakeArmed = false
         refreshHelperStatus()
@@ -488,6 +492,7 @@ final class AppDelegate: NSObject,
     }
 
     private func clearPreferences() {
+        companionConfigurationStore.deleteSecrets()
         guard let bundleIdentifier = Bundle.main.bundleIdentifier else { return }
         UserDefaults.standard.removePersistentDomain(forName: bundleIdentifier)
         UserDefaults.standard.synchronize()
@@ -649,6 +654,7 @@ final class AppDelegate: NSObject,
     func companionServer(
         _ server: CompanionServer,
         perform command: RemoteCommand,
+        argument: String,
         completion: @escaping (Result<(RemoteState, String), Error>) -> Void
     ) {
         switch command {
@@ -657,12 +663,77 @@ final class AppDelegate: NSObject,
         case .keepAwake:
             performRemoteKeepAwake(completion: completion)
         case .sleep:
+            cancelScheduledSleep()
             performRemoteSleep(completion: completion)
+        case .scheduleSleep:
+            performRemoteScheduleSleep(argument: argument, completion: completion)
+        case .cancelScheduledSleep:
+            cancelScheduledSleep()
+            completion(.success((makeRemoteState(), "The sleep timer is off.")))
         case .wake:
             completion(.failure(
                 CompanionRemoteError("Wake requests must be sent to the iPhone relay.")
             ))
         }
+    }
+
+    private func performRemoteScheduleSleep(
+        argument: String,
+        completion: @escaping (Result<(RemoteState, String), Error>) -> Void
+    ) {
+        guard let seconds = Int64(argument), (60...86_400).contains(seconds) else {
+            completion(.failure(
+                CompanionRemoteError("The sleep timer must be between 1 minute and 24 hours.")
+            ))
+            return
+        }
+
+        refreshHelperStatus()
+        guard helperStatus == .enabled else {
+            completion(.failure(
+                CompanionRemoteError(
+                    "The privileged helper is not enabled. Open Modafinil on the Mac to approve it."
+                )
+            ))
+            return
+        }
+
+        scheduledSleepTimer?.invalidate()
+        let fireDate = Date().addingTimeInterval(TimeInterval(seconds))
+        scheduledSleepDate = fireDate
+        let timer = Timer(fire: fireDate, interval: 0, repeats: false) { [weak self] _ in
+            self?.scheduledSleepTimerFired()
+        }
+        scheduledSleepTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+
+        completion(.success((
+            makeRemoteState(),
+            "The Mac will sleep when the timer ends."
+        )))
+    }
+
+    private func scheduledSleepTimerFired() {
+        let overdue = scheduledSleepDate.map { Date().timeIntervalSince($0) } ?? 0
+        scheduledSleepTimer = nil
+        scheduledSleepDate = nil
+
+        // A timer that could not fire because the Mac was already asleep must
+        // not put it straight back to sleep when it wakes.
+        guard overdue < 30 else { return }
+
+        performRemoteSleep { [weak self] result in
+            if case .failure(let error) = result {
+                self?.lastError = "Scheduled sleep failed: \(error.localizedDescription)"
+                self?.refreshIcon()
+            }
+        }
+    }
+
+    private func cancelScheduledSleep() {
+        scheduledSleepTimer?.invalidate()
+        scheduledSleepTimer = nil
+        scheduledSleepDate = nil
     }
 
     private func performRemoteKeepAwake(
@@ -792,7 +863,8 @@ final class AppDelegate: NSObject,
         RemoteState(
             awakeRequested: isAwakeRequestedForStatus,
             sleepPreventionEffective: isSleepPreventionEnabled,
-            serverName: Host.current().localizedName ?? "Mac"
+            serverName: Host.current().localizedName ?? "Mac",
+            scheduledSleepAt: scheduledSleepDate.map { Int64($0.timeIntervalSince1970) }
         )
     }
 

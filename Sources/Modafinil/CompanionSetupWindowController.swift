@@ -104,7 +104,9 @@ private final class CompanionSetupViewController: NSViewController {
 
         let explanation = NSTextField(
             wrappingLabelWithString: """
-            Configure the XR wake relay, then scan the private QR code in Modafinil Companion on your iPhone.
+            Configure the XR wake relay, copy the relay secret into the XR's \
+            /var/jb/etc/modafinil-relay.plist, then scan the private QR code in \
+            Modafinil Companion on your iPhone.
             """
         )
         explanation.textColor = .secondaryLabelColor
@@ -159,13 +161,20 @@ private final class CompanionSetupViewController: NSViewController {
         saveButton.bezelStyle = .rounded
 
         let resetButton = NSButton(
-            title: "Generate New Secret…",
+            title: "Generate New Secrets…",
             target: self,
-            action: #selector(resetSecret)
+            action: #selector(resetSecrets)
         )
         resetButton.bezelStyle = .rounded
 
-        let editActions = NSStackView(views: [saveButton, resetButton])
+        let relaySecretButton = NSButton(
+            title: "Copy Relay Secret",
+            target: self,
+            action: #selector(copyRelaySecret)
+        )
+        relaySecretButton.bezelStyle = .rounded
+
+        let editActions = NSStackView(views: [saveButton, resetButton, relaySecretButton])
         editActions.orientation = .horizontal
         editActions.spacing = 8
         form.addArrangedSubview(editActions)
@@ -277,21 +286,36 @@ private final class CompanionSetupViewController: NSViewController {
         }
     }
 
-    @objc private func resetSecret() {
+    @objc private func resetSecrets() {
         let alert = NSAlert()
-        alert.messageText = "Generate a new pairing secret?"
+        alert.messageText = "Generate new pairing secrets?"
         alert.informativeText = """
-        Existing iPhone pairings will stop working until you scan the new QR code.
+        Existing iPhone pairings will stop working until you scan the new QR \
+        code, and the XR relay will reject wake requests until you provision \
+        the new relay secret on it.
         """
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Generate")
         alert.addButton(withTitle: "Cancel")
 
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        configurationStore.resetSecret()
+        configurationStore.resetSecrets()
         statusLabel.textColor = .systemGreen
-        statusLabel.stringValue = "A new secret was generated locally."
+        statusLabel.stringValue = "New secrets were generated locally."
         refresh()
+    }
+
+    @objc private func copyRelaySecret() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(
+            configurationStore.relaySecret.base64EncodedString(),
+            forType: .string
+        )
+        statusLabel.textColor = .systemGreen
+        statusLabel.stringValue = """
+        Relay secret copied. Write it as SharedSecret in \
+        /var/jb/etc/modafinil-relay.plist on the XR (root-owned, mode 0600).
+        """
     }
 
     @objc private func copyPairingLink() {

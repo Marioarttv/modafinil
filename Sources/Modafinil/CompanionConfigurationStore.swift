@@ -12,28 +12,43 @@ final class CompanionConfigurationStore {
     static let defaultRelayPort: UInt16 = 48_766
 
     private enum Key {
-        static let secret = "companion.secret"
+        static let legacySecret = "companion.secret"
         static let relayHost = "companion.relayHost"
         static let relayPort = "companion.relayPort"
         static let targetMACs = "companion.targetMACs"
         static let wakeArmed = "companion.wakeArmed"
     }
 
+    private enum KeychainAccount {
+        static let macSecret = "companion-secret"
+        static let relaySecret = "companion-relay-secret"
+    }
+
     private let defaults: UserDefaults
+    private let keychain = CompanionSecretKeychain()
+    private var cachedSecret: Data
+    private var cachedRelaySecret: Data
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        ensureSecretExists()
+        cachedSecret = Self.loadOrCreateSecret(
+            keychain: keychain,
+            account: KeychainAccount.macSecret,
+            legacyDefaults: defaults
+        )
+        cachedRelaySecret = Self.loadOrCreateSecret(
+            keychain: keychain,
+            account: KeychainAccount.relaySecret,
+            legacyDefaults: nil
+        )
     }
 
-    var secret: Data {
-        guard let secret = defaults.data(forKey: Key.secret), secret.count == 32 else {
-            let secret = RemoteAuthentication.generateSecret()
-            defaults.set(secret, forKey: Key.secret)
-            return secret
-        }
-        return secret
-    }
+    /// Authenticates iPhone commands to this Mac's listener.
+    var secret: Data { cachedSecret }
+
+    /// Authenticates iPhone wake requests to the XR relay. Kept separate so
+    /// a compromise of the jailbroken relay phone cannot control this Mac.
+    var relaySecret: Data { cachedRelaySecret }
 
     var relayHost: String {
         defaults.string(forKey: Key.relayHost) ?? ""
@@ -79,12 +94,21 @@ final class CompanionConfigurationStore {
         )
     }
 
-    func resetSecret() {
-        defaults.set(RemoteAuthentication.generateSecret(), forKey: Key.secret)
+    func resetSecrets() {
+        cachedSecret = RemoteAuthentication.generateSecret()
+        cachedRelaySecret = RemoteAuthentication.generateSecret()
+        keychain.setSecret(cachedSecret, account: KeychainAccount.macSecret)
+        keychain.setSecret(cachedRelaySecret, account: KeychainAccount.relaySecret)
         NotificationCenter.default.post(
             name: .modafinilCompanionConfigurationDidChange,
             object: self
         )
+    }
+
+    func deleteSecrets() {
+        keychain.deleteSecret(account: KeychainAccount.macSecret)
+        keychain.deleteSecret(account: KeychainAccount.relaySecret)
+        defaults.removeObject(forKey: Key.legacySecret)
     }
 
     func pairingConfiguration(
@@ -99,12 +123,32 @@ final class CompanionConfigurationStore {
             targetMAC: configuredTargetMACs ??
                 networkInformation.wifiMACAddress ??
                 "",
-            secret: secret
+            secret: secret,
+            relaySecret: relaySecret
         )
     }
 
-    private func ensureSecretExists() {
-        guard defaults.data(forKey: Key.secret)?.count != 32 else { return }
-        defaults.set(RemoteAuthentication.generateSecret(), forKey: Key.secret)
+    private static func loadOrCreateSecret(
+        keychain: CompanionSecretKeychain,
+        account: String,
+        legacyDefaults: UserDefaults?
+    ) -> Data {
+        if let existing = keychain.secret(account: account), existing.count == 32 {
+            return existing
+        }
+
+        if let legacyDefaults,
+           let legacy = legacyDefaults.data(forKey: Key.legacySecret),
+           legacy.count == 32
+        {
+            if keychain.setSecret(legacy, account: account) {
+                legacyDefaults.removeObject(forKey: Key.legacySecret)
+            }
+            return legacy
+        }
+
+        let secret = RemoteAuthentication.generateSecret()
+        keychain.setSecret(secret, account: account)
+        return secret
     }
 }

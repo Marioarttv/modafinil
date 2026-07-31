@@ -4,6 +4,7 @@ import XCTest
 
 final class RemoteProtocolTests: XCTestCase {
     private let secret = Data(repeating: 0xa5, count: 32)
+    private let relaySecret = Data(repeating: 0x5a, count: 32)
 
     func testProtocolMatchesKnownCompanionVector() {
         let request = RemoteRequest.signed(
@@ -85,7 +86,8 @@ final class RemoteProtocolTests: XCTestCase {
             macHost: "100.64.1.2",
             relayHost: "100.64.1.3",
             targetMAC: "aa:bb:cc:dd:ee:ff,11:22:33:44:55:66",
-            secret: secret
+            secret: secret,
+            relaySecret: relaySecret
         )
 
         XCTAssertEqual(
@@ -96,13 +98,47 @@ final class RemoteProtocolTests: XCTestCase {
 
     func testPairingURLRejectsDuplicateKeys() {
         let encodedSecret = secret.base64EncodedString()
+        let encodedRelaySecret = relaySecret.base64EncodedString()
         let url = URL(
             string: """
-            modafinil://pair?v=1&v=1&name=Mac&macHost=127.0.0.1&macPort=48765&relayHost=127.0.0.1&relayPort=48766&targetMAC=aa:bb:cc:dd:ee:02&secret=\(encodedSecret)
+            modafinil://pair?v=2&v=2&name=Mac&macHost=127.0.0.1&macPort=48765&relayHost=127.0.0.1&relayPort=48766&targetMAC=aa:bb:cc:dd:ee:02&secret=\(encodedSecret)&relaySecret=\(encodedRelaySecret)
             """
         )!
 
         XCTAssertThrowsError(try PairingConfiguration(pairingURL: url))
+    }
+
+    func testScheduledSleepIsCoveredByStateSignature() {
+        let state = RemoteState(
+            awakeRequested: true,
+            sleepPreventionEffective: true,
+            serverName: "MacBook",
+            scheduledSleepAt: 1_750_003_600
+        )
+        let response = RemoteResponse.signed(
+            requestID: "00000000-0000-4000-8000-000000000005",
+            ok: true,
+            state: state,
+            message: "Timer set",
+            secret: secret,
+            timestamp: 1_750_000_000
+        )
+        XCTAssertTrue(response.isAuthentic(secret: secret))
+
+        let tampered = RemoteResponse(
+            requestID: response.requestID,
+            timestamp: response.timestamp,
+            ok: response.ok,
+            state: RemoteState(
+                awakeRequested: true,
+                sleepPreventionEffective: true,
+                serverName: "MacBook",
+                scheduledSleepAt: 1_750_007_200
+            ),
+            message: response.message,
+            signature: response.signature
+        )
+        XCTAssertFalse(tampered.isAuthentic(secret: secret))
     }
 
     private func assertVerificationFailure(

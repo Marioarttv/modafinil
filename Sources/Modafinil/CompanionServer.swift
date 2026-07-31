@@ -8,6 +8,7 @@ protocol CompanionServerDelegate: AnyObject {
     func companionServer(
         _ server: CompanionServer,
         perform command: RemoteCommand,
+        argument: String,
         completion: @escaping (Result<(RemoteState, String), Error>) -> Void
     )
 }
@@ -228,7 +229,11 @@ final class CompanionServer {
                 return
             }
 
-            delegate.companionServer(self, perform: request.command) { result in
+            delegate.companionServer(
+                self,
+                perform: request.command,
+                argument: request.argument
+            ) { result in
                 self.queue.async {
                     switch result {
                     case .success(let (state, message)):
