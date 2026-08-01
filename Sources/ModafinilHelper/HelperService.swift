@@ -1,5 +1,4 @@
 import Foundation
-import IOKit.pwr_mgt
 import ModafinilShared
 
 final class HelperService: NSObject, NSXPCListenerDelegate {
@@ -123,55 +122,6 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
             }
         }
     }
-
-    fileprivate func scheduleWake(
-        at date: Date,
-        withReply reply: @escaping (Bool, String?) -> Void
-    ) {
-        stateQueue.async {
-            let lead = date.timeIntervalSinceNow
-            guard lead >= 30, lead <= 48 * 3_600 else {
-                reply(false, "The wake time must be between 30 seconds and 48 hours from now.")
-                return
-            }
-
-            let status = IOPMSchedulePowerEvent(
-                date as CFDate,
-                Self.wakeEventOwner as CFString,
-                kIOPMAutoWake as CFString
-            )
-            guard status == kIOReturnSuccess else {
-                reply(false, "Scheduling the wake event failed (IOReturn \(status)).")
-                return
-            }
-
-            NSLog("ModafinilHelper scheduled an RTC wake for \(date)")
-            reply(true, nil)
-        }
-    }
-
-    fileprivate func cancelScheduledWake(
-        at date: Date,
-        withReply reply: @escaping (Bool, String?) -> Void
-    ) {
-        stateQueue.async {
-            let status = IOPMCancelScheduledPowerEvent(
-                date as CFDate,
-                Self.wakeEventOwner as CFString,
-                kIOPMAutoWake as CFString
-            )
-            // A missing event is not an error: it may have already fired.
-            guard status == kIOReturnSuccess || status == kIOReturnNotFound else {
-                reply(false, "Cancelling the wake event failed (IOReturn \(status)).")
-                return
-            }
-
-            NSLog("ModafinilHelper cancelled the RTC wake scheduled for \(date)")
-            reply(true, nil)
-        }
-    }
-
-    private static let wakeEventOwner = "com.narcotic.modafinil"
 
     private func clientConnectionStarted(sessionID: UUID) {
         stateQueue.async {
@@ -327,29 +277,5 @@ private final class HelperSession: NSObject, ModafinilHelperProtocol {
         }
 
         service.sleepAfterDisablingSleepPrevention(withReply: reply)
-    }
-
-    func scheduleWake(
-        at date: Date,
-        withReply reply: @escaping (Bool, String?) -> Void
-    ) {
-        guard let service else {
-            reply(false, "The helper service is unavailable.")
-            return
-        }
-
-        service.scheduleWake(at: date, withReply: reply)
-    }
-
-    func cancelScheduledWake(
-        at date: Date,
-        withReply reply: @escaping (Bool, String?) -> Void
-    ) {
-        guard let service else {
-            reply(false, "The helper service is unavailable.")
-            return
-        }
-
-        service.cancelScheduledWake(at: date, withReply: reply)
     }
 }

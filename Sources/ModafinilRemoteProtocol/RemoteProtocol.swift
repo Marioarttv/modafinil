@@ -9,7 +9,6 @@ public enum RemoteCommand: String, Codable, Sendable {
     case scheduleSleep
     case cancelScheduledSleep
     case wake
-    case collectPendingWake
 }
 
 public struct RemoteState: Codable, Equatable, Sendable {

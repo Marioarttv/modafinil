@@ -7,8 +7,7 @@ final class AppDelegate: NSObject,
     CompanionServerDelegate,
     CompanionSetupWindowControllerDelegate,
     StatusPopoverViewControllerDelegate,
-    StatusWindowControllerDelegate,
-    BatteryWakeWindowControllerDelegate
+    StatusWindowControllerDelegate
 {
     private let helperClient = PrivilegedHelperClient()
     private let helperInstaller = PrivilegedHelperInstaller()
@@ -41,9 +40,6 @@ final class AppDelegate: NSObject,
     private var provisionalWakeLeaseTimer: Timer?
     private var scheduledSleepTimer: Timer?
     private var scheduledSleepDate: Date?
-    private lazy var batteryWakeWindowController = BatteryWakeWindowController(
-        configurationStore: companionConfigurationStore
-    )
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("Modafinil applicationDidFinishLaunching")
@@ -94,9 +90,6 @@ final class AppDelegate: NSObject,
         refreshIcon()
         showStatusWindow()
 
-        batteryWakeWindowController.delegate = self
-        batteryWakeWindowController.start()
-
         if companionConfigurationStore.isWakeArmed {
             activateProvisionalWakeLease()
         }
@@ -133,7 +126,6 @@ final class AppDelegate: NSObject,
         statusWindowController?.close()
         companionSetupWindowController?.close()
         companionServer?.stop()
-        batteryWakeWindowController.stop()
         helperClient.invalidate()
         lidMonitor.stop()
     }
@@ -219,7 +211,6 @@ final class AppDelegate: NSObject,
         let nextState = !isAwakeRequestedForStatus
 
         cancelProvisionalWakeLease()
-        batteryWakeWindowController.disarm(reason: "sleep prevention was toggled on the Mac")
         companionConfigurationStore.isWakeArmed = false
         isSleepPreventionRequested = nextState
         refreshHelperStatus()
@@ -450,7 +441,6 @@ final class AppDelegate: NSObject,
     private func restoreNormalSleepBehavior(completion: @escaping (Result<Void, Error>) -> Void) {
         cancelScheduledSleep()
         cancelProvisionalWakeLease()
-        batteryWakeWindowController.disarm(reason: "the app is restoring normal sleep behavior")
         companionConfigurationStore.isWakeArmed = false
         refreshHelperStatus()
         let localSleepPreventionStatus = readLocalSleepPreventionStatus()
@@ -684,10 +674,6 @@ final class AppDelegate: NSObject,
             completion(.failure(
                 CompanionRemoteError("Wake requests must be sent to the iPhone relay.")
             ))
-        case .collectPendingWake:
-            completion(.failure(
-                CompanionRemoteError("Pending-wake collection is handled by the iPhone relay.")
-            ))
         }
     }
 
@@ -776,7 +762,6 @@ final class AppDelegate: NSObject,
 
         companionConfigurationStore.isWakeArmed = false
         cancelProvisionalWakeLease()
-        batteryWakeWindowController.disarm(reason: "the companion requested keep-awake")
         isSleepPreventionRequested = true
 
         if isCodexRuntimeLimitEnabled {
@@ -856,11 +841,6 @@ final class AppDelegate: NSObject,
                 self.isSleepPreventionEnabled = false
                 self.lidMonitor.setEnabled(false)
                 self.refreshIcon()
-                if PowerSource.isRunningOnBattery() {
-                    // Wake-on-LAN cannot reach this Mac on battery, so fall
-                    // back to periodic RTC wake windows that poll the relay.
-                    self.batteryWakeWindowController.arm()
-                }
                 completion(.success((
                     self.makeRemoteState(),
                     "Sleep prevention is off. The Mac is going to sleep."
@@ -877,49 +857,6 @@ final class AppDelegate: NSObject,
                 completion(.failure(error))
             }
         }
-    }
-
-    // MARK: - BatteryWakeWindowControllerDelegate
-
-    func batteryWakeWindowControllerBeginAwakeHold(
-        _ controller: BatteryWakeWindowController
-    ) {
-        isProvisionalWakeLeaseActive = true
-        scheduleProvisionalWakeLeaseExpiration()
-        reconcileSleepPreventionWithCurrentMode()
-    }
-
-    func batteryWakeWindowControllerEndAwakeHold(
-        _ controller: BatteryWakeWindowController
-    ) {
-        cancelProvisionalWakeLease()
-        reconcileSleepPreventionWithCurrentMode()
-    }
-
-    func batteryWakeWindowControllerDidCollectPendingWake(
-        _ controller: BatteryWakeWindowController
-    ) {
-        // Restart the lease so the companion has the full window to reconnect
-        // and issue keep-awake.
-        isProvisionalWakeLeaseActive = true
-        scheduleProvisionalWakeLeaseExpiration()
-        reconcileSleepPreventionWithCurrentMode()
-    }
-
-    func batteryWakeWindowController(
-        _ controller: BatteryWakeWindowController,
-        scheduleWakeAt date: Date,
-        completion: @escaping (Result<Void, Error>) -> Void
-    ) {
-        helperClient.scheduleWake(at: date, completion: completion)
-    }
-
-    func batteryWakeWindowController(
-        _ controller: BatteryWakeWindowController,
-        cancelScheduledWakeAt date: Date,
-        completion: @escaping (Result<Void, Error>) -> Void
-    ) {
-        helperClient.cancelScheduledWake(at: date, completion: completion)
     }
 
     private func makeRemoteState() -> RemoteState {
