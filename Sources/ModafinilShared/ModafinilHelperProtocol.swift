@@ -17,4 +17,16 @@ public protocol ModafinilHelperProtocol {
     func sleepAfterDisablingSleepPrevention(
         withReply reply: @escaping (Bool, String?) -> Void
     )
+
+    @objc(scheduleWakeAtDate:withReply:)
+    func scheduleWake(
+        at date: Date,
+        withReply reply: @escaping (Bool, String?) -> Void
+    )
+
+    @objc(cancelScheduledWakeAtDate:withReply:)
+    func cancelScheduledWake(
+        at date: Date,
+        withReply reply: @escaping (Bool, String?) -> Void
+    )
 }

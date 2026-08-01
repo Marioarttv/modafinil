@@ -36,6 +36,7 @@ let package = Package(
             name: "ModafinilHelper",
             dependencies: ["ModafinilShared"],
             linkerSettings: [
+                .linkedFramework("IOKit"),
                 .linkedFramework("Security")
             ]
         ),

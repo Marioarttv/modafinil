@@ -17,6 +17,9 @@ final class CompanionConfigurationStore {
         static let relayPort = "companion.relayPort"
         static let targetMACs = "companion.targetMACs"
         static let wakeArmed = "companion.wakeArmed"
+        static let batteryWakeWindowsArmed = "companion.batteryWakeWindowsArmed"
+        static let batteryWakeNextWindowAt = "companion.batteryWakeNextWindowAt"
+        static let batteryWakeWindowsRemaining = "companion.batteryWakeWindowsRemaining"
     }
 
     private enum KeychainAccount {
@@ -70,6 +73,38 @@ final class CompanionConfigurationStore {
         get { defaults.bool(forKey: Key.wakeArmed) }
         set {
             defaults.set(newValue, forKey: Key.wakeArmed)
+            defaults.synchronize()
+        }
+    }
+
+    var areBatteryWakeWindowsArmed: Bool {
+        get { defaults.bool(forKey: Key.batteryWakeWindowsArmed) }
+        set {
+            defaults.set(newValue, forKey: Key.batteryWakeWindowsArmed)
+            defaults.synchronize()
+        }
+    }
+
+    var batteryWakeNextWindowDate: Date? {
+        get {
+            let timestamp = defaults.double(forKey: Key.batteryWakeNextWindowAt)
+            guard timestamp > 0 else { return nil }
+            return Date(timeIntervalSince1970: timestamp)
+        }
+        set {
+            if let newValue {
+                defaults.set(newValue.timeIntervalSince1970, forKey: Key.batteryWakeNextWindowAt)
+            } else {
+                defaults.removeObject(forKey: Key.batteryWakeNextWindowAt)
+            }
+            defaults.synchronize()
+        }
+    }
+
+    var batteryWakeWindowsRemaining: Int {
+        get { defaults.integer(forKey: Key.batteryWakeWindowsRemaining) }
+        set {
+            defaults.set(newValue, forKey: Key.batteryWakeWindowsRemaining)
             defaults.synchronize()
         }
     }
