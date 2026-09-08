@@ -28,6 +28,19 @@ Opening Modafinil from Launchpad or Finder shows the same controls in a regular 
 
 The menu also includes an "Only While Codex Is Running" option. When enabled, Modafinil keeps sleep prevention requested but only applies it while a Codex app or `codex` command is running.
 
+## Sleep timer
+
+In the Modafinil window or menu bar popover, use **Sleep Timer** to choose a preset
+or type a duration from 1 to 1440 minutes, then click **Start Timer**. The live
+countdown shows when the Mac will sleep. **Update Timer** replaces the current
+timer with the selected duration starting now; **Cancel Timer** turns it off.
+The privileged helper must be enabled to start a timer.
+
+The Mac and iPhone control the same timer, so either can view, replace, or cancel
+it. At expiry, Modafinil turns off sleep prevention and puts the Mac to sleep.
+Setting a timer does not change the current keep-awake mode. Keep Modafinil open:
+quitting cancels the timer, and timers are not restored after restarting the app.
+
 ## iPhone companion access
 
 Open Modafinil from Launchpad and choose **Companion Setup…** to pair the iPhone companion app. Modafinil discovers the Mac's Tailscale IPv4 address and current Wi-Fi MAC address, lets you enter the XR wake relay address and up to four comma-separated wake MAC addresses, and creates a private pairing QR code.

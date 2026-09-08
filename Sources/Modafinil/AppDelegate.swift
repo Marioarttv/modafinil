@@ -626,6 +626,22 @@ final class AppDelegate: NSObject,
         toggleCodexRuntimeLimit()
     }
 
+    func statusPopover(_ viewController: StatusPopoverViewController, didScheduleSleepAfter seconds: Int) {
+        scheduleSleep(argument: String(seconds)) { [weak self] result in
+            switch result {
+            case .success:
+                self?.lastError = nil
+            case .failure(let error):
+                self?.lastError = error.localizedDescription
+            }
+            self?.refreshIcon()
+        }
+    }
+
+    func statusPopoverDidCancelScheduledSleep(_ viewController: StatusPopoverViewController) {
+        cancelScheduledSleep()
+    }
+
     func statusPopoverDidOpenCompanionSetup(_ viewController: StatusPopoverViewController) {
         showCompanionSetup()
     }
@@ -666,7 +682,7 @@ final class AppDelegate: NSObject,
             cancelScheduledSleep()
             performRemoteSleep(completion: completion)
         case .scheduleSleep:
-            performRemoteScheduleSleep(argument: argument, completion: completion)
+            scheduleSleep(argument: argument, completion: completion)
         case .cancelScheduledSleep:
             cancelScheduledSleep()
             completion(.success((makeRemoteState(), "The sleep timer is off.")))
@@ -677,7 +693,7 @@ final class AppDelegate: NSObject,
         }
     }
 
-    private func performRemoteScheduleSleep(
+    private func scheduleSleep(
         argument: String,
         completion: @escaping (Result<(RemoteState, String), Error>) -> Void
     ) {
@@ -706,6 +722,7 @@ final class AppDelegate: NSObject,
         }
         scheduledSleepTimer = timer
         RunLoop.main.add(timer, forMode: .common)
+        refreshIcon()
 
         completion(.success((
             makeRemoteState(),
@@ -717,6 +734,7 @@ final class AppDelegate: NSObject,
         let overdue = scheduledSleepDate.map { Date().timeIntervalSince($0) } ?? 0
         scheduledSleepTimer = nil
         scheduledSleepDate = nil
+        refreshIcon()
 
         // A timer that could not fire because the Mac was already asleep must
         // not put it straight back to sleep when it wakes.
@@ -734,6 +752,7 @@ final class AppDelegate: NSObject,
         scheduledSleepTimer?.invalidate()
         scheduledSleepTimer = nil
         scheduledSleepDate = nil
+        refreshIcon()
     }
 
     private func performRemoteKeepAwake(
@@ -1106,6 +1125,8 @@ final class AppDelegate: NSObject,
             primaryActionTitle: isAwakeRequestedForStatus ? "Turn Off" : "Turn On",
             isPrimaryActionEnabled: !isToggleInFlight,
             isCodexRuntimeLimitEnabled: isCodexRuntimeLimitEnabled,
+            scheduledSleepDate: scheduledSleepDate,
+            canScheduleSleep: helperStatus == .enabled && !isToggleInFlight && !isQuitInProgress,
             lastError: lastError
         )
     }
