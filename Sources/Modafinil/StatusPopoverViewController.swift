@@ -5,6 +5,8 @@ protocol StatusPopoverViewControllerDelegate: AnyObject {
     func statusPopoverDidToggleCodexRuntimeLimit(_ viewController: StatusPopoverViewController)
     func statusPopover(_ viewController: StatusPopoverViewController, didScheduleSleepAfter seconds: Int)
     func statusPopoverDidCancelScheduledSleep(_ viewController: StatusPopoverViewController)
+    func statusPopover(_ viewController: StatusPopoverViewController, didScheduleWakeAt date: Date)
+    func statusPopoverDidCancelScheduledWake(_ viewController: StatusPopoverViewController)
     func statusPopoverDidOpenCompanionSetup(_ viewController: StatusPopoverViewController)
     func statusPopoverDidOpenBackgroundSettings(_ viewController: StatusPopoverViewController)
     func statusPopoverDidQuit(_ viewController: StatusPopoverViewController)
@@ -49,6 +51,8 @@ final class StatusPopoverViewController: NSViewController {
         let isCodexRuntimeLimitEnabled: Bool
         let scheduledSleepDate: Date?
         let canScheduleSleep: Bool
+        let scheduledWakeDate: Date?
+        let canScheduleWake: Bool
         let lastError: String?
     }
 
@@ -82,6 +86,11 @@ final class StatusPopoverViewController: NSViewController {
     private let startSleepTimerButton = NSButton(title: "Start Timer", target: nil, action: nil)
     private let cancelSleepTimerButton = NSButton(title: "Cancel Timer", target: nil, action: nil)
     private var scheduledSleepDate: Date?
+    private let wakeDatePicker = NSDatePicker()
+    private let wakeTimerLabel = NSTextField(wrappingLabelWithString: "No wake scheduled")
+    private let scheduleWakeButton = NSButton(title: "Schedule Wake", target: nil, action: nil)
+    private let cancelWakeButton = NSButton(title: "Cancel Wake", target: nil, action: nil)
+    private var presentedWakeDate: Date?
     private var countdownTimer: Timer?
     private var isPresenting = false
 
@@ -149,6 +158,8 @@ final class StatusPopoverViewController: NSViewController {
         contentStack.addArrangedSubview(makeSeparator())
 
         contentStack.addArrangedSubview(makeSleepTimerView())
+        contentStack.addArrangedSubview(makeSeparator())
+        contentStack.addArrangedSubview(makeWakeTimerView())
         contentStack.addArrangedSubview(makeSeparator())
 
         primaryButton.target = self
@@ -223,6 +234,16 @@ final class StatusPopoverViewController: NSViewController {
         startSleepTimerButton.title = scheduledSleepDate == nil ? "Start Timer" : "Update Timer"
         startSleepTimerButton.isEnabled = viewModel.canScheduleSleep
         cancelSleepTimerButton.isEnabled = scheduledSleepDate != nil
+        if presentedWakeDate != viewModel.scheduledWakeDate {
+            presentedWakeDate = viewModel.scheduledWakeDate
+            if let date = presentedWakeDate { wakeDatePicker.dateValue = date }
+        }
+        wakeTimerLabel.stringValue = viewModel.scheduledWakeDate.map {
+            "Wake & keep awake: \($0.formatted(date: .abbreviated, time: .shortened))"
+        } ?? "No wake scheduled"
+        scheduleWakeButton.title = viewModel.scheduledWakeDate == nil ? "Schedule Wake" : "Update Wake"
+        scheduleWakeButton.isEnabled = viewModel.canScheduleWake
+        cancelWakeButton.isEnabled = viewModel.canScheduleWake && viewModel.scheduledWakeDate != nil
         updateCountdown()
         updateCountdownTimer()
 
@@ -275,6 +296,48 @@ final class StatusPopoverViewController: NSViewController {
         let countdown = String(format: "%02d:%02d:%02d", remaining / 3600, (remaining / 60) % 60, remaining % 60)
         sleepTimerLabel.stringValue = "Mac sleeps in \(countdown)"
         sleepTimerLabel.toolTip = "Scheduled for \(scheduledSleepDate.formatted(date: .omitted, time: .shortened))"
+    }
+
+    private func makeWakeTimerView() -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        let heading = NSTextField(labelWithString: "Wake Timer")
+        heading.font = .systemFont(ofSize: 13, weight: .semibold)
+        stack.addArrangedSubview(heading)
+        wakeTimerLabel.font = .systemFont(ofSize: 12)
+        wakeTimerLabel.preferredMaxLayoutWidth = presentation.width - presentation.contentInset * 2
+        wakeTimerLabel.setAccessibilityIdentifier("wakeTimerStatus")
+        stack.addArrangedSubview(wakeTimerLabel)
+        wakeDatePicker.datePickerStyle = .textFieldAndStepper
+        wakeDatePicker.datePickerElements = [.yearMonthDay, .hourMinute]
+        wakeDatePicker.dateValue = Date(timeIntervalSince1970: floor(Date().addingTimeInterval(3600).timeIntervalSince1970 / 60) * 60)
+        wakeDatePicker.setAccessibilityLabel("Scheduled wake date and time")
+        wakeDatePicker.setAccessibilityIdentifier("wakeDateTime")
+        stack.addArrangedSubview(wakeDatePicker)
+        scheduleWakeButton.target = self
+        scheduleWakeButton.action = #selector(scheduleWakeClicked)
+        cancelWakeButton.target = self
+        cancelWakeButton.action = #selector(cancelWakeClicked)
+        for button in [scheduleWakeButton, cancelWakeButton] { button.bezelStyle = .rounded }
+        stack.addArrangedSubview(NSStackView(views: [scheduleWakeButton, cancelWakeButton]))
+        let hint = NSTextField(wrappingLabelWithString: "One-time wake, up to 30 days ahead. Keep your Mac on power and Modafinil open to stay awake afterward. Scheduling does not put it to sleep.")
+        hint.font = .systemFont(ofSize: 12)
+        hint.textColor = .secondaryLabelColor
+        hint.preferredMaxLayoutWidth = presentation.width - presentation.contentInset * 2
+        stack.addArrangedSubview(hint)
+        return stack
+    }
+
+    @objc private func scheduleWakeClicked() {
+        view.window?.makeFirstResponder(nil)
+        let date = Date(timeIntervalSince1970: floor(wakeDatePicker.dateValue.timeIntervalSince1970 / 60) * 60)
+        delegate?.statusPopover(self, didScheduleWakeAt: date)
+    }
+
+    @objc private func cancelWakeClicked() {
+        delegate?.statusPopoverDidCancelScheduledWake(self)
     }
 
     private func makeSleepTimerView() -> NSView {

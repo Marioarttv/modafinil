@@ -157,6 +157,7 @@ final class CompanionServer {
         } catch {
             send(
                 requestID: request.requestID,
+                version: request.version,
                 ok: false,
                 state: nil,
                 message: error.localizedDescription,
@@ -181,6 +182,7 @@ final class CompanionServer {
         guard request.command != .wake else {
             send(
                 requestID: request.requestID,
+                version: request.version,
                 ok: false,
                 state: nil,
                 message: "Wake requests must be sent to the iPhone relay.",
@@ -193,6 +195,7 @@ final class CompanionServer {
         guard let delegate else {
             send(
                 requestID: request.requestID,
+                version: request.version,
                 ok: false,
                 state: nil,
                 message: "Modafinil is not ready.",
@@ -212,6 +215,7 @@ final class CompanionServer {
                 self.queue.async {
                     self.send(
                         requestID: request.requestID,
+                        version: request.version,
                         ok: true,
                         state: state,
                         message: "Status updated.",
@@ -239,6 +243,7 @@ final class CompanionServer {
                     case .success(let (state, message)):
                         self.send(
                             requestID: request.requestID,
+                            version: request.version,
                             ok: true,
                             state: state,
                             message: message,
@@ -248,6 +253,7 @@ final class CompanionServer {
                     case .failure(let error):
                         self.send(
                             requestID: request.requestID,
+                            version: request.version,
                             ok: false,
                             state: nil,
                             message: error.localizedDescription,
@@ -262,6 +268,7 @@ final class CompanionServer {
 
     private func send(
         requestID: String,
+        version: Int,
         ok: Bool,
         state: RemoteState?,
         message: String,
@@ -269,6 +276,7 @@ final class CompanionServer {
         on connection: NWConnection
     ) {
         let response = RemoteResponse.signed(
+            version: RemoteResponse.supportedVersions.contains(version) ? version : 1,
             requestID: requestID,
             ok: ok,
             state: state,

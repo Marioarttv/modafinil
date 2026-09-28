@@ -8,6 +8,8 @@ public enum RemoteCommand: String, Codable, Sendable {
     case sleep
     case scheduleSleep
     case cancelScheduledSleep
+    case scheduleWake
+    case cancelScheduledWake
     case wake
 }
 
@@ -16,22 +18,28 @@ public struct RemoteState: Codable, Equatable, Sendable {
     public let sleepPreventionEffective: Bool
     public let serverName: String
     public let scheduledSleepAt: Int64?
+    public let scheduledWakeAt: Int64?
 
     public init(
         awakeRequested: Bool,
         sleepPreventionEffective: Bool,
         serverName: String,
-        scheduledSleepAt: Int64? = nil
+        scheduledSleepAt: Int64? = nil,
+        scheduledWakeAt: Int64? = nil
     ) {
         self.awakeRequested = awakeRequested
         self.sleepPreventionEffective = sleepPreventionEffective
         self.serverName = serverName
         self.scheduledSleepAt = scheduledSleepAt
+        self.scheduledWakeAt = scheduledWakeAt
     }
 }
 
 public struct RemoteRequest: Codable, Equatable, Sendable {
+    // Version 1 remains the default for existing phones and the wake relay.
     public static let currentVersion = 1
+    public static let wakeSchedulingVersion = 2
+    public static let supportedVersions: Set<Int> = [1, 2]
 
     public let version: Int
     public let requestID: String
@@ -57,6 +65,7 @@ public struct RemoteRequest: Codable, Equatable, Sendable {
     }
 
     public static func signed(
+        version: Int = Self.currentVersion,
         command: RemoteCommand,
         argument: String = "",
         secret: Data,
@@ -64,6 +73,7 @@ public struct RemoteRequest: Codable, Equatable, Sendable {
         timestamp: Int64 = Int64(Date().timeIntervalSince1970)
     ) -> Self {
         let unsigned = Self(
+            version: version,
             requestID: requestID,
             timestamp: timestamp,
             command: command,
@@ -71,6 +81,7 @@ public struct RemoteRequest: Codable, Equatable, Sendable {
             signature: ""
         )
         return Self(
+            version: version,
             requestID: requestID,
             timestamp: timestamp,
             command: command,
@@ -97,7 +108,7 @@ public struct RemoteRequest: Codable, Equatable, Sendable {
     }
 
     public func isAuthentic(secret: Data) -> Bool {
-        version == Self.currentVersion &&
+        Self.supportedVersions.contains(version) &&
             RemoteAuthentication.isValid(
                 signature: signature,
                 payload: canonicalPayload,
@@ -107,7 +118,10 @@ public struct RemoteRequest: Codable, Equatable, Sendable {
 }
 
 public struct RemoteResponse: Codable, Equatable, Sendable {
+    // Version 1 remains the default for existing phones and the wake relay.
     public static let currentVersion = 1
+    public static let wakeSchedulingVersion = 2
+    public static let supportedVersions: Set<Int> = [1, 2]
 
     public let version: Int
     public let requestID: String
@@ -136,6 +150,7 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
     }
 
     public static func signed(
+        version: Int = Self.currentVersion,
         requestID: String,
         ok: Bool,
         state: RemoteState? = nil,
@@ -143,19 +158,28 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
         secret: Data,
         timestamp: Int64 = Int64(Date().timeIntervalSince1970)
     ) -> Self {
+        // Never attach a wake field that a legacy verifier cannot authenticate.
+        let responseState = version == 1 ? state.map {
+            RemoteState(awakeRequested: $0.awakeRequested,
+                        sleepPreventionEffective: $0.sleepPreventionEffective,
+                        serverName: $0.serverName,
+                        scheduledSleepAt: $0.scheduledSleepAt)
+        } : state
         let unsigned = Self(
+            version: version,
             requestID: requestID,
             timestamp: timestamp,
             ok: ok,
-            state: state,
+            state: responseState,
             message: message,
             signature: ""
         )
         return Self(
+            version: version,
             requestID: requestID,
             timestamp: timestamp,
             ok: ok,
-            state: state,
+            state: responseState,
             message: message,
             signature: RemoteAuthentication.signature(
                 for: unsigned.canonicalPayload,
@@ -167,12 +191,16 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
     public var canonicalPayload: Data {
         let statePayload: String
         if let state {
-            statePayload = [
+            var fields = [
                 state.awakeRequested ? "1" : "0",
                 state.sleepPreventionEffective ? "1" : "0",
                 state.serverName,
                 state.scheduledSleepAt.map(String.init) ?? ""
-            ].joined(separator: "\u{1f}")
+            ]
+            if version >= Self.wakeSchedulingVersion {
+                fields.append(state.scheduledWakeAt.map(String.init) ?? "")
+            }
+            statePayload = fields.joined(separator: "\u{1f}")
         } else {
             statePayload = ""
         }
@@ -192,7 +220,8 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
     }
 
     public func isAuthentic(secret: Data) -> Bool {
-        version == Self.currentVersion &&
+        Self.supportedVersions.contains(version) &&
+            (version >= Self.wakeSchedulingVersion || state?.scheduledWakeAt == nil) &&
             RemoteAuthentication.isValid(
                 signature: signature,
                 payload: canonicalPayload,
@@ -255,7 +284,8 @@ public final class RemoteRequestVerifier: @unchecked Sendable {
         _ request: RemoteRequest,
         now: Int64 = Int64(Date().timeIntervalSince1970)
     ) throws {
-        guard request.version == RemoteRequest.currentVersion else {
+        guard RemoteRequest.supportedVersions.contains(request.version),
+              (request.version >= 2 || ![RemoteCommand.scheduleWake, .cancelScheduledWake].contains(request.command)) else {
             throw VerificationError.unsupportedVersion
         }
         guard UUID(uuidString: request.requestID) != nil else {

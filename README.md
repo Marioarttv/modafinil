@@ -41,6 +41,31 @@ it. At expiry, Modafinil turns off sleep prevention and puts the Mac to sleep.
 Setting a timer does not change the current keep-awake mode. Keep Modafinil open:
 quitting cancels the timer, and timers are not restored after restarting the app.
 
+## Wake timer
+
+Use **Wake Timer** in the Mac window or menu bar popover to pick a one-time
+date and time, then click **Schedule Wake**. **Update Wake** replaces that alarm;
+**Cancel Wake** removes it. Modafinil Companion 1.3 on iPhone controls the same
+alarm with **Wake At…** and **Cancel Wake Timer**. Refresh the phone to see
+changes made on the Mac.
+
+The privileged helper uses `IOPMSchedulePowerEvent` to register a native wake
+event, between one minute and 30 days ahead, owned by
+`com.narcotic.modafinil.scheduled-wake`. Updates and cancellation preserve
+other apps' power events. The alarm survives sleep and app restarts and needs
+no iPhone or iPad connection once saved. Keep the Mac on AC and Modafinil open
+to enable keep-awake after the alarm. The timer wakes from sleep; it does not
+schedule shutdown/power-on, unlock the Mac, or launch a task itself.
+
+Quitting the app leaves the wake alarm in macOS. Cancel it explicitly before
+quitting if you do not want it. The app restores the pending alarm on launch;
+alarms missed by more than five minutes do not unexpectedly enable keep-awake
+when the app is reopened later. The sleep timer remains separate.
+
+Companion protocol v2 authenticates the scheduled wake timestamp. The Mac still
+serves v1 clients using their original response format; the existing jailbroken
+wake relay and pairing secrets are unchanged.
+
 ## iPhone companion access
 
 Open Modafinil from Launchpad and choose **Companion Setup…** to pair the iPhone companion app. Modafinil discovers the Mac's Tailscale IPv4 address and current Wi-Fi MAC address, lets you enter the XR wake relay address and up to four comma-separated wake MAC addresses, and creates a private pairing QR code.

@@ -2,6 +2,12 @@ import Foundation
 
 @objc(ModafinilHelperProtocol)
 public protocol ModafinilHelperProtocol {
+    @objc(setScheduledWake:withReply:)
+    func setScheduledWake(
+        _ timestamp: Double,
+        withReply reply: @escaping (Bool, String?) -> Void
+    )
+
     @objc(setSleepPreventionEnabled:withReply:)
     func setSleepPreventionEnabled(
         _ enabled: Bool,

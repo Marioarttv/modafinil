@@ -10,6 +10,7 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
     private var activeLeaseIDs = Set<UUID>()
     private var idleExitWorkItem: DispatchWorkItem?
     private var pendingRemoteSleepWorkItem: DispatchWorkItem?
+    private let wakeScheduler = WakeScheduler()
     private let ownershipMarkerURL = URL(
         fileURLWithPath: "/Library/Application Support/Modafinil/sleep-prevention.enabled"
     )
@@ -116,6 +117,21 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
                     deadline: .now() + self.remoteSleepDelay,
                     execute: workItem
                 )
+                reply(true, nil)
+            } catch {
+                reply(false, error.localizedDescription)
+            }
+        }
+    }
+
+    fileprivate func setScheduledWake(_ timestamp: Double, withReply reply: @escaping (Bool, String?) -> Void) {
+        stateQueue.async {
+            do {
+                if timestamp == 0 {
+                    try self.wakeScheduler.cancel()
+                } else {
+                    try self.wakeScheduler.schedule(Date(timeIntervalSince1970: timestamp))
+                }
                 reply(true, nil)
             } catch {
                 reply(false, error.localizedDescription)
@@ -243,6 +259,14 @@ private final class HelperSession: NSObject, ModafinilHelperProtocol {
 
     init(service: HelperService) {
         self.service = service
+    }
+
+    func setScheduledWake(_ timestamp: Double, withReply reply: @escaping (Bool, String?) -> Void) {
+        guard let service else {
+            reply(false, "The helper service is unavailable.")
+            return
+        }
+        service.setScheduledWake(timestamp, withReply: reply)
     }
 
     func setSleepPreventionEnabled(

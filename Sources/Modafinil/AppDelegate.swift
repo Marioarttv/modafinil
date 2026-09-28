@@ -1,4 +1,5 @@
 import AppKit
+import ModafinilShared
 import ModafinilRemoteProtocol
 import ServiceManagement
 
@@ -40,6 +41,10 @@ final class AppDelegate: NSObject,
     private var provisionalWakeLeaseTimer: Timer?
     private var scheduledSleepTimer: Timer?
     private var scheduledSleepDate: Date?
+    private var scheduledWakeTimer: Timer?
+    private var scheduledWakeDate: Date?
+    private var isWakeScheduleInFlight = false
+    private static let scheduledWakeDefaultsKey = "companion.scheduledWakeAt"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("Modafinil applicationDidFinishLaunching")
@@ -86,6 +91,7 @@ final class AppDelegate: NSObject,
         updateCodexRuntimeMonitoring()
         refreshHelperStatus()
         refreshSleepStatus()
+        restoreScheduledWake()
         startCompanionServer()
         refreshIcon()
         showStatusWindow()
@@ -122,6 +128,7 @@ final class AppDelegate: NSObject,
         codexRuntimeTimer?.invalidate()
         provisionalWakeLeaseTimer?.invalidate()
         scheduledSleepTimer?.invalidate()
+        scheduledWakeTimer?.invalidate()
         statusPopover.performClose(nil)
         statusWindowController?.close()
         companionSetupWindowController?.close()
@@ -159,7 +166,9 @@ final class AppDelegate: NSObject,
     }
 
     @objc private func workspaceDidWake() {
-        activateProvisionalWakeLease()
+        if !completeScheduledWakeIfDue() {
+            activateProvisionalWakeLease()
+        }
     }
 
     private func activateProvisionalWakeLease() {
@@ -686,6 +695,14 @@ final class AppDelegate: NSObject,
         case .cancelScheduledSleep:
             cancelScheduledSleep()
             completion(.success((makeRemoteState(), "The sleep timer is off.")))
+        case .scheduleWake:
+            guard let timestamp = Int64(argument) else {
+                completion(.failure(CompanionRemoteError("The wake time is invalid.")))
+                return
+            }
+            setScheduledWake(Date(timeIntervalSince1970: TimeInterval(timestamp)), completion: completion)
+        case .cancelScheduledWake:
+            setScheduledWake(nil, completion: completion)
         case .wake:
             completion(.failure(
                 CompanionRemoteError("Wake requests must be sent to the iPhone relay.")
@@ -879,12 +896,122 @@ final class AppDelegate: NSObject,
     }
 
     private func makeRemoteState() -> RemoteState {
-        RemoteState(
+        synchronizeWakeSchedule()
+        return RemoteState(
             awakeRequested: isAwakeRequestedForStatus,
             sleepPreventionEffective: isSleepPreventionEnabled,
             serverName: Host.current().localizedName ?? "Mac",
-            scheduledSleepAt: scheduledSleepDate.map { Int64($0.timeIntervalSince1970) }
+            scheduledSleepAt: scheduledSleepDate.map { Int64($0.timeIntervalSince1970) },
+            scheduledWakeAt: scheduledWakeDate.map { Int64($0.timeIntervalSince1970) }
         )
+    }
+
+    private func setScheduledWake(
+        _ date: Date?,
+        completion: @escaping (Result<(RemoteState, String), Error>) -> Void
+    ) {
+        guard !isWakeScheduleInFlight else {
+            completion(.failure(CompanionRemoteError("The wake schedule is being updated.")))
+            return
+        }
+        do {
+            if let date { try WakeScheduler.validate(date) }
+        } catch {
+            completion(.failure(error))
+            return
+        }
+        refreshHelperStatus()
+        guard helperStatus == .enabled else {
+            completion(.failure(CompanionRemoteError("Enable the privileged helper in Modafinil on the Mac first.")))
+            return
+        }
+        isWakeScheduleInFlight = true
+        refreshIcon()
+        helperClient.setScheduledWake(date?.timeIntervalSince1970 ?? 0) { [weak self] result in
+            guard let self else { return }
+            self.isWakeScheduleInFlight = false
+            self.synchronizeWakeSchedule(force: true)
+            self.refreshIcon()
+            switch result {
+            case .success:
+                completion(.success((self.makeRemoteState(), date == nil
+                    ? "The wake timer is off."
+                    : "Wake scheduled on the Mac. Keep Modafinil open to stay awake afterward.")))
+            case .failure(let error):
+                completion(.failure(error))
+            }
+        }
+    }
+
+    private func restoreScheduledWake() {
+        let saved = UserDefaults.standard.double(forKey: Self.scheduledWakeDefaultsKey)
+        if saved > 0 { scheduledWakeDate = Date(timeIntervalSince1970: saved) }
+        synchronizeWakeSchedule()
+        if !completeScheduledWakeIfDue() { armScheduledWakeTimer() }
+    }
+
+    private func synchronizeWakeSchedule(force: Bool = false) {
+        let systemDate = WakeScheduler().scheduledDate()
+        // Preserve a just-fired alarm until the wake handler can consume it.
+        if !force, let date = scheduledWakeDate, date <= Date(),
+           Date().timeIntervalSince(date) <= 300 { return }
+        guard force || systemDate != scheduledWakeDate else { return }
+        scheduledWakeDate = systemDate
+        saveScheduledWake()
+        armScheduledWakeTimer()
+    }
+
+    private func saveScheduledWake() {
+        if let date = scheduledWakeDate {
+            UserDefaults.standard.set(date.timeIntervalSince1970, forKey: Self.scheduledWakeDefaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.scheduledWakeDefaultsKey)
+        }
+    }
+
+    private func armScheduledWakeTimer() {
+        scheduledWakeTimer?.invalidate()
+        scheduledWakeTimer = nil
+        guard let date = scheduledWakeDate else { return }
+        let timer = Timer(fire: date, interval: 0, repeats: false) { [weak self] _ in
+            _ = self?.completeScheduledWakeIfDue()
+        }
+        scheduledWakeTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @discardableResult
+    private func completeScheduledWakeIfDue() -> Bool {
+        guard let date = scheduledWakeDate, date <= Date() else { return false }
+        let overdue = Date().timeIntervalSince(date)
+        scheduledWakeDate = nil
+        scheduledWakeTimer?.invalidate()
+        scheduledWakeTimer = nil
+        saveScheduledWake()
+        refreshIcon()
+        // A wake alarm missed hours ago must not unexpectedly change the mode.
+        guard overdue <= 300 else { return false }
+        performRemoteKeepAwake { [weak self] result in
+            if case .failure(let error) = result {
+                self?.lastError = "Scheduled wake keep-awake failed: \(error.localizedDescription)"
+                self?.refreshIcon()
+            }
+        }
+        return true
+    }
+
+    func statusPopover(_ viewController: StatusPopoverViewController, didScheduleWakeAt date: Date) {
+        setScheduledWake(date) { [weak self] result in
+            if case .failure(let error) = result { self?.lastError = error.localizedDescription }
+            self?.refreshIcon()
+        }
+    }
+
+    func statusPopoverDidCancelScheduledWake(_ viewController: StatusPopoverViewController) {
+        setScheduledWake(nil) { [weak self] result in
+            if case .failure(let error) = result { self?.lastError = error.localizedDescription }
+            self?.refreshIcon()
+        }
     }
 
     private func updateCodexRuntimeMonitoring() {
@@ -1112,7 +1239,8 @@ final class AppDelegate: NSObject,
     }
 
     private func makeStatusViewModel() -> StatusPopoverViewController.ViewModel {
-        StatusPopoverViewController.ViewModel(
+        synchronizeWakeSchedule()
+        return StatusPopoverViewController.ViewModel(
             symbolName: statusSymbolName,
             symbolColor: statusSymbolColor,
             title: statusTitle,
@@ -1127,6 +1255,8 @@ final class AppDelegate: NSObject,
             isCodexRuntimeLimitEnabled: isCodexRuntimeLimitEnabled,
             scheduledSleepDate: scheduledSleepDate,
             canScheduleSleep: helperStatus == .enabled && !isToggleInFlight && !isQuitInProgress,
+            scheduledWakeDate: scheduledWakeDate,
+            canScheduleWake: helperStatus == .enabled && !isWakeScheduleInFlight && !isQuitInProgress,
             lastError: lastError
         )
     }

@@ -12,7 +12,8 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "ModafinilShared"
+            name: "ModafinilShared",
+            linkerSettings: [.linkedFramework("IOKit")]
         ),
         .target(
             name: "ModafinilRemoteProtocol",
@@ -41,7 +42,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ModafinilRemoteProtocolTests",
-            dependencies: ["ModafinilRemoteProtocol"]
+            dependencies: ["ModafinilRemoteProtocol", "ModafinilShared"]
         )
     ]
 )

@@ -40,6 +40,41 @@ final class PrivilegedHelperClient {
         }
     }
 
+    func setScheduledWake(
+        _ timestamp: Double,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        var didComplete = false
+        let finish: (Result<Void, Error>) -> Void = { result in
+            DispatchQueue.main.async {
+                guard !didComplete else { return }
+                didComplete = true
+                completion(result)
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + requestTimeout) { [weak self] in
+            guard !didComplete else { return }
+            self?.invalidate()
+            finish(.failure(HelperError("The helper did not respond.")))
+        }
+
+        remoteProxy { proxyResult in
+            switch proxyResult {
+            case .failure(let error):
+                finish(.failure(error))
+            case .success(let proxy):
+                proxy.setScheduledWake(timestamp) { success, message in
+                    if success {
+                        finish(.success(()))
+                    } else {
+                        finish(.failure(HelperError(message ?? "The helper could not update the wake schedule (update or re-enable the Mac helper if needed).")))
+                    }
+                }
+            }
+        }
+    }
+
     func getSleepPreventionStatus(
         completion: @escaping (Result<Bool, Error>) -> Void
     ) {
