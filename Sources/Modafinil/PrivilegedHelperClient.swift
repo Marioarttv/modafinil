@@ -132,12 +132,35 @@ final class PrivilegedHelperClient {
             case .failure(let error):
                 finish(.failure(error))
             case .success(let proxy):
-                proxy.sleepAfterDisablingSleepPrevention { success, message in
+                proxy.requestTrackedSleep { success, message in
                     if success {
                         finish(.success(()))
                     } else {
                         finish(.failure(HelperError(message ?? "The helper could not put the Mac to sleep.")))
                     }
+                }
+            }
+        }
+    }
+
+    func setSleepTimer(after seconds: Double, completion: @escaping (Result<Void, Error>) -> Void) {
+        var didComplete = false
+        let finish: (Result<Void, Error>) -> Void = { result in
+            DispatchQueue.main.async {
+                guard !didComplete else { return }
+                didComplete = true
+                completion(result)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + requestTimeout) {
+            finish(.failure(HelperError("The helper did not confirm the sleep timer. Update Modafinil and its helper on this Mac.")))
+        }
+        remoteProxy { result in
+            switch result {
+            case .failure(let error): finish(.failure(error))
+            case .success(let proxy):
+                proxy.setSleepTimer(after: seconds) { success, message in
+                    finish(success ? .success(()) : .failure(HelperError(message ?? "Could not update the sleep timer.")))
                 }
             }
         }

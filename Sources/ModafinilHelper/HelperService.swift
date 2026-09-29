@@ -5,11 +5,24 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
     private let listener = NSXPCListener(machServiceName: ModafinilConstants.helperMachServiceName)
     private let stateQueue = DispatchQueue(label: "com.narcotic.modafinil.helper.state")
     private let idleExitDelay: TimeInterval = 15
-    private let remoteSleepDelay: TimeInterval = 2
     private var connectedSessionIDs = Set<UUID>()
     private var activeLeaseIDs = Set<UUID>()
     private var idleExitWorkItem: DispatchWorkItem?
-    private var pendingRemoteSleepWorkItem: DispatchWorkItem?
+    private var sleepTickTimer: DispatchSourceTimer?
+    private var sleepJournalLoadError: String?
+    private lazy var sleepCoordinator: SleepCoordinator = {
+        let journal: SleepJournal
+        do { journal = try SleepJournalStore.read() }
+        catch {
+            sleepJournalLoadError = "Saved sleep state could not be read. Set the timer again."
+            journal = SleepJournal()
+        }
+        return SleepCoordinator(journal: journal, disablePrevention: { [unowned self] in
+            try self.setSystemSleepPreventionEnabled(false)
+            self.activeLeaseIDs.removeAll()
+            self.removeOwnershipMarker()
+        })
+    }()
     private let wakeScheduler = WakeScheduler()
     private let ownershipMarkerURL = URL(
         fileURLWithPath: "/Library/Application Support/Modafinil/sleep-prevention.enabled"
@@ -55,9 +68,8 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         withReply reply: @escaping (Bool, String?) -> Void
     ) {
         stateQueue.async {
-            self.cancelPendingRemoteSleep()
-
             do {
+                try self.sleepCoordinator.cancelPending()
                 if enabled {
                     do {
                         try self.writeOwnershipMarker()
@@ -98,30 +110,44 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
     ) {
         stateQueue.async {
             do {
-                self.cancelPendingRemoteSleep()
-                try self.setSystemSleepPreventionEnabled(false)
-                self.activeLeaseIDs.removeAll()
-                self.removeOwnershipMarker()
-
-                let workItem = DispatchWorkItem { [weak self] in
-                    guard let self else { return }
-                    self.pendingRemoteSleepWorkItem = nil
-                    do {
-                        try self.runSystemSleepNow()
-                    } catch {
-                        NSLog("ModafinilHelper could not put the Mac to sleep: \(error.localizedDescription)")
-                    }
-                }
-                self.pendingRemoteSleepWorkItem = workItem
-                self.stateQueue.asyncAfter(
-                    deadline: .now() + self.remoteSleepDelay,
-                    execute: workItem
-                )
+                try self.sleepCoordinator.begin()
+                self.updateSleepTickTimer()
                 reply(true, nil)
-            } catch {
-                reply(false, error.localizedDescription)
-            }
+            } catch { reply(false, error.localizedDescription) }
         }
+    }
+
+    fileprivate func setSleepTimer(after seconds: Double, withReply reply: @escaping (Bool, String?) -> Void) {
+        stateQueue.async {
+            do {
+                if seconds == -1 {
+                    try self.sleepCoordinator.cancelSchedule()
+                    try self.sleepCoordinator.cancelPending()
+                } else if seconds == 0 { try self.sleepCoordinator.cancelSchedule() }
+                else { try self.sleepCoordinator.schedule(after: seconds) }
+                self.updateSleepTickTimer()
+                reply(true, nil)
+            } catch { reply(false, error.localizedDescription) }
+        }
+    }
+
+    private func updateSleepTickTimer() {
+        sleepTickTimer?.cancel()
+        sleepTickTimer = nil
+        guard sleepCoordinator.hasWork else {
+            scheduleIdleExitIfNeeded()
+            return
+        }
+        cancelIdleExit()
+        let timer = DispatchSource.makeTimerSource(queue: stateQueue)
+        timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.sleepCoordinator.tick()
+            if !self.sleepCoordinator.hasWork { self.updateSleepTickTimer() }
+        }
+        sleepTickTimer = timer
+        timer.resume()
     }
 
     fileprivate func setScheduledWake(_ timestamp: Double, withReply reply: @escaping (Bool, String?) -> Void) {
@@ -168,6 +194,14 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
     private func performStartupCleanup() {
         stateQueue.async {
             self.restoreStaleSleepPreventionIfNeeded()
+            do {
+                let coordinator = self.sleepCoordinator
+                if let error = self.sleepJournalLoadError { coordinator.stopAfterFailure(error) }
+                else { try coordinator.restore() }
+            } catch {
+                self.sleepCoordinator.stopAfterFailure("Sleep monitoring could not restart: \(error.localizedDescription)")
+            }
+            self.updateSleepTickTimer()
             self.scheduleIdleExitIfNeeded()
         }
     }
@@ -188,7 +222,7 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
     }
 
     private func scheduleIdleExitIfNeeded() {
-        guard connectedSessionIDs.isEmpty, activeLeaseIDs.isEmpty else { return }
+        guard connectedSessionIDs.isEmpty, activeLeaseIDs.isEmpty, !sleepCoordinator.hasWork else { return }
 
         cancelIdleExit()
         let workItem = DispatchWorkItem { [weak self] in
@@ -206,22 +240,13 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
     private func exitIfStillIdle() {
         idleExitWorkItem = nil
 
-        guard connectedSessionIDs.isEmpty, activeLeaseIDs.isEmpty else { return }
+        guard connectedSessionIDs.isEmpty, activeLeaseIDs.isEmpty, !sleepCoordinator.hasWork else { return }
         NSLog("ModafinilHelper exiting after idle timeout")
         exit(EXIT_SUCCESS)
     }
 
     private func setSystemSleepPreventionEnabled(_ enabled: Bool) throws {
         try Shell.run("/usr/bin/pmset", ["-a", "disablesleep", enabled ? "1" : "0"])
-    }
-
-    private func runSystemSleepNow() throws {
-        try Shell.run("/usr/bin/pmset", ["sleepnow"])
-    }
-
-    private func cancelPendingRemoteSleep() {
-        pendingRemoteSleepWorkItem?.cancel()
-        pendingRemoteSleepWorkItem = nil
     }
 
     private func readSleepPreventionStatus() throws -> Bool {
@@ -259,6 +284,15 @@ private final class HelperSession: NSObject, ModafinilHelperProtocol {
 
     init(service: HelperService) {
         self.service = service
+    }
+
+    func requestTrackedSleep(withReply reply: @escaping (Bool, String?) -> Void) {
+        sleepAfterDisablingSleepPrevention(withReply: reply)
+    }
+
+    func setSleepTimer(after seconds: Double, withReply reply: @escaping (Bool, String?) -> Void) {
+        guard let service else { reply(false, "The helper service is unavailable."); return }
+        service.setSleepTimer(after: seconds, withReply: reply)
     }
 
     func setScheduledWake(_ timestamp: Double, withReply reply: @escaping (Bool, String?) -> Void) {

@@ -28,18 +28,36 @@ Opening Modafinil from Launchpad or Finder shows the same controls in a regular 
 
 The menu also includes an "Only While Codex Is Running" option. When enabled, Modafinil keeps sleep prevention requested but only applies it while a Codex app or `codex` command is running.
 
-## Sleep timer
+## Sleep timer and confirmed results
 
-In the Modafinil window or menu bar popover, use **Sleep Timer** to choose a preset
-or type a duration from 1 to 1440 minutes, then click **Start Timer**. The live
-countdown shows when the Mac will sleep. **Update Timer** replaces the current
-timer with the selected duration starting now; **Cancel Timer** turns it off.
-The privileged helper must be enabled to start a timer.
+Use **Sleep Timer** to choose 1–1440 minutes, update, or cancel. The privileged
+helper stores the timer, so UI suspension and helper restarts do not lose it.
+Quitting Modafinil cancels scheduled and pending sleep; reboot discards a timer.
+Missed timers never put a just-awakened Mac back to sleep.
 
-The Mac and iPhone control the same timer, so either can view, replace, or cancel
-it. At expiry, Modafinil turns off sleep prevention and puts the Mac to sleep.
-Setting a timer does not change the current keep-awake mode. Keep Modafinil open:
-quitting cancels the timer, and timers are not restored after restarting the app.
+The helper requests sleep through public `IOPMSleepSystem`, records a durable
+receipt, and checks kernel sleep/wake timestamps. Acceptance is not confirmation.
+At most three requests run over 32 seconds; any observed sleep ends retries,
+even if the Mac wakes immediately afterward. Native errors and missing sleep
+transitions are reported in both apps. Continuous time bounds the timer and
+verification window despite wall-clock changes. The journal is root-written
+at `/Library/Application Support/Modafinil/sleep-journal.json`; it contains only
+timer/result metadata, with no pairing keys, credentials, or screen contents.
+
+The iPhone clears expired countdowns, refreshes on foreground entry and performs
+one delayed result check. It labels an unreachable Mac as unverified. The Mac
+continues to permit network wake and macOS maintenance; this is not a guarantee
+of uninterrupted deep sleep. Companion 1.4 uses protocol v3; v1/v2 clients remain
+compatible but cannot display sleep receipts.
+
+Validation on 2026-09-29 included 40 passing Swift tests, a signed release build,
+Mac timer save/cancel checks, and an approved live one-minute timer. macOS logged
+software sleep from the helper at 21:14:51 CEST; the durable receipt confirmed
+kernel sleep at 21:14:53 after one native request. Connecting USB-C caused a wake
+at 21:16:13. macOS returned to sleep and fully woke at 21:17. Keep-awake was
+restored and both test timers were cleared. Because power was connected during
+sleep, this validates the sleep path and recovery but is not an isolated proof
+of the scheduled wake source.
 
 ## Wake timer
 
@@ -72,7 +90,7 @@ Open Modafinil from Launchpad and choose **Companion Setup…** to pair the iPho
 
 The Mac listener is event-driven and listens on TCP port `48765`. It accepts only loopback and Tailscale source addresses. Every request and response is authenticated with a locally generated 256-bit secret; requests also require a current timestamp and a unique UUID to prevent replay. The root helper is never exposed to the network.
 
-A companion sleep request first arms a one-time wake lease, disables Modafinil, and receives an acknowledgement from the signed local helper. The helper then puts the Mac to sleep after a short delay so the network response can finish. When macOS posts its wake notification, Modafinil enables a 90-second provisional wake lease while the iPhone reconnects and confirms **Keep Awake**.
+A companion sleep request first arms a one-time wake lease, disables Modafinil, and receives an acknowledgement from the signed local helper. After a short delay for the response, the helper requests sleep and records whether the kernel confirms it. When macOS posts its wake notification, Modafinil enables a 90-second provisional wake lease while the iPhone reconnects and confirms **Keep Awake**.
 
 The pairing secret is stored only in the current macOS user's preferences. Generating a new secret invalidates all previous pairings.
 

@@ -50,6 +50,7 @@ final class StatusPopoverViewController: NSViewController {
         let isPrimaryActionEnabled: Bool
         let isCodexRuntimeLimitEnabled: Bool
         let scheduledSleepDate: Date?
+        let sleepAttemptDescription: String
         let canScheduleSleep: Bool
         let scheduledWakeDate: Date?
         let canScheduleWake: Bool
@@ -82,6 +83,7 @@ final class StatusPopoverViewController: NSViewController {
     )
     private let sleepDurationInput = NSComboBox()
     private let sleepTimerLabel = NSTextField(labelWithString: "Sleep timer is off")
+    private let sleepAttemptLabel = NSTextField(wrappingLabelWithString: "")
     private let sleepTimerErrorLabel = NSTextField(labelWithString: "")
     private let startSleepTimerButton = NSButton(title: "Start Timer", target: nil, action: nil)
     private let cancelSleepTimerButton = NSButton(title: "Cancel Timer", target: nil, action: nil)
@@ -93,6 +95,8 @@ final class StatusPopoverViewController: NSViewController {
     private var presentedWakeDate: Date?
     private var countdownTimer: Timer?
     private var isPresenting = false
+    private let scrollView = NSScrollView()
+    private let scrollContent = FlippedStatusContentView()
 
     private let quitButton = NSButton(title: "Quit Modafinil", target: nil, action: nil)
 
@@ -116,13 +120,26 @@ final class StatusPopoverViewController: NSViewController {
         contentStack.alignment = .leading
         contentStack.distribution = .fill
         contentStack.spacing = 12
-        view.addSubview(contentStack)
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.hasVerticalScroller = true
+        scrollView.drawsBackground = false
+        scrollView.documentView = scrollContent
+        scrollContent.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(scrollView)
+        scrollContent.addSubview(contentStack)
+        NSLayoutConstraint.activate([
+            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            scrollContent.widthAnchor.constraint(equalToConstant: presentation.width),
+        ])
 
         NSLayoutConstraint.activate([
-            contentStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: presentation.contentInset),
-            contentStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -presentation.contentInset),
-            contentStack.topAnchor.constraint(equalTo: view.topAnchor, constant: presentation.contentInset),
-            contentStack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -presentation.contentInset)
+            contentStack.leadingAnchor.constraint(equalTo: scrollContent.leadingAnchor, constant: presentation.contentInset),
+            contentStack.trailingAnchor.constraint(equalTo: scrollContent.trailingAnchor, constant: -presentation.contentInset),
+            contentStack.topAnchor.constraint(equalTo: scrollContent.topAnchor, constant: presentation.contentInset),
+            contentStack.bottomAnchor.constraint(equalTo: scrollContent.bottomAnchor, constant: -presentation.contentInset)
         ])
 
         contentStack.addArrangedSubview(makeHeaderView())
@@ -230,6 +247,7 @@ final class StatusPopoverViewController: NSViewController {
             errorLabel.isHidden = true
         }
 
+        sleepAttemptLabel.stringValue = viewModel.sleepAttemptDescription
         scheduledSleepDate = viewModel.scheduledSleepDate
         startSleepTimerButton.title = scheduledSleepDate == nil ? "Start Timer" : "Update Timer"
         startSleepTimerButton.isEnabled = viewModel.canScheduleSleep
@@ -382,8 +400,12 @@ final class StatusPopoverViewController: NSViewController {
         sleepTimerErrorLabel.textColor = .systemRed
         sleepTimerErrorLabel.isHidden = true
         stack.addArrangedSubview(sleepTimerErrorLabel)
+        sleepAttemptLabel.font = .systemFont(ofSize: 12)
+        sleepAttemptLabel.textColor = .secondaryLabelColor
+        sleepAttemptLabel.preferredMaxLayoutWidth = presentation.width - presentation.contentInset * 2
+        stack.addArrangedSubview(sleepAttemptLabel)
 
-        let hint = NSTextField(wrappingLabelWithString: "Puts your Mac to sleep when the timer ends. Keep Modafinil open; quitting cancels the timer.")
+        let hint = NSTextField(wrappingLabelWithString: "Saved by the Mac helper and verified against system sleep history. Quitting Modafinil cancels the timer. Network access or macOS maintenance can wake the Mac again.")
         hint.font = .systemFont(ofSize: 12)
         hint.textColor = .secondaryLabelColor
         hint.preferredMaxLayoutWidth = presentation.width - (presentation.contentInset * 2)
@@ -413,7 +435,10 @@ final class StatusPopoverViewController: NSViewController {
     private func resizeToFitContent() {
         view.needsLayout = true
         view.layoutSubtreeIfNeeded()
-        preferredContentSize = NSSize(width: presentation.width, height: max(260, view.fittingSize.height))
+        let height = max(260, scrollContent.fittingSize.height)
+        scrollContent.setFrameSize(NSSize(width: presentation.width, height: height))
+        let availableHeight = (view.window?.screen ?? NSScreen.main)?.visibleFrame.height ?? 800
+        preferredContentSize = NSSize(width: presentation.width, height: min(height, max(350, availableHeight - 100)))
         if presentation == .window {
             view.window?.setContentSize(preferredContentSize)
         }
@@ -487,4 +512,8 @@ final class StatusPopoverViewController: NSViewController {
     @objc private func quitButtonClicked() {
         delegate?.statusPopoverDidQuit(self)
     }
+}
+
+private final class FlippedStatusContentView: NSView {
+    override var isFlipped: Bool { true }
 }

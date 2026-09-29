@@ -13,25 +13,41 @@ public enum RemoteCommand: String, Codable, Sendable {
     case wake
 }
 
+public struct RemoteSleepAttempt: Codable, Equatable, Sendable {
+    public enum Phase: String, Codable, Sendable { case pending, confirmed, failed, cancelled }
+    public let requestedAt: Int64
+    public let phase: Phase
+    public let sleptAt: Int64?
+    public let wokeAt: Int64?
+    public let detail: String
+    public init(requestedAt: Int64, phase: Phase, sleptAt: Int64? = nil, wokeAt: Int64? = nil, detail: String) {
+        self.requestedAt = requestedAt; self.phase = phase
+        self.sleptAt = sleptAt; self.wokeAt = wokeAt; self.detail = detail
+    }
+}
+
 public struct RemoteState: Codable, Equatable, Sendable {
     public let awakeRequested: Bool
     public let sleepPreventionEffective: Bool
     public let serverName: String
     public let scheduledSleepAt: Int64?
     public let scheduledWakeAt: Int64?
+    public let sleepAttempt: RemoteSleepAttempt?
 
     public init(
         awakeRequested: Bool,
         sleepPreventionEffective: Bool,
         serverName: String,
         scheduledSleepAt: Int64? = nil,
-        scheduledWakeAt: Int64? = nil
+        scheduledWakeAt: Int64? = nil,
+        sleepAttempt: RemoteSleepAttempt? = nil
     ) {
         self.awakeRequested = awakeRequested
         self.sleepPreventionEffective = sleepPreventionEffective
         self.serverName = serverName
         self.scheduledSleepAt = scheduledSleepAt
         self.scheduledWakeAt = scheduledWakeAt
+        self.sleepAttempt = sleepAttempt
     }
 }
 
@@ -39,7 +55,8 @@ public struct RemoteRequest: Codable, Equatable, Sendable {
     // Version 1 remains the default for existing phones and the wake relay.
     public static let currentVersion = 1
     public static let wakeSchedulingVersion = 2
-    public static let supportedVersions: Set<Int> = [1, 2]
+    public static let sleepTrackingVersion = 3
+    public static let supportedVersions: Set<Int> = [1, 2, 3]
 
     public let version: Int
     public let requestID: String
@@ -121,7 +138,8 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
     // Version 1 remains the default for existing phones and the wake relay.
     public static let currentVersion = 1
     public static let wakeSchedulingVersion = 2
-    public static let supportedVersions: Set<Int> = [1, 2]
+    public static let sleepTrackingVersion = 3
+    public static let supportedVersions: Set<Int> = [1, 2, 3]
 
     public let version: Int
     public let requestID: String
@@ -158,13 +176,14 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
         secret: Data,
         timestamp: Int64 = Int64(Date().timeIntervalSince1970)
     ) -> Self {
-        // Never attach a wake field that a legacy verifier cannot authenticate.
-        let responseState = version == 1 ? state.map {
+        // Older peers must never receive fields absent from their signed payload.
+        let responseState = state.map {
             RemoteState(awakeRequested: $0.awakeRequested,
                         sleepPreventionEffective: $0.sleepPreventionEffective,
-                        serverName: $0.serverName,
-                        scheduledSleepAt: $0.scheduledSleepAt)
-        } : state
+                        serverName: $0.serverName, scheduledSleepAt: $0.scheduledSleepAt,
+                        scheduledWakeAt: version >= 2 ? $0.scheduledWakeAt : nil,
+                        sleepAttempt: version >= 3 ? $0.sleepAttempt : nil)
+        }
         let unsigned = Self(
             version: version,
             requestID: requestID,
@@ -200,7 +219,14 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
             if version >= Self.wakeSchedulingVersion {
                 fields.append(state.scheduledWakeAt.map(String.init) ?? "")
             }
-            statePayload = fields.joined(separator: "\u{1f}")
+            if version >= Self.sleepTrackingVersion {
+                // JSON makes boundaries unambiguous even inside error messages.
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+                statePayload = (try! encoder.encode(state)).base64EncodedString()
+            } else {
+                statePayload = fields.joined(separator: "\u{1f}")
+            }
         } else {
             statePayload = ""
         }
@@ -222,6 +248,7 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
     public func isAuthentic(secret: Data) -> Bool {
         Self.supportedVersions.contains(version) &&
             (version >= Self.wakeSchedulingVersion || state?.scheduledWakeAt == nil) &&
+            (version >= Self.sleepTrackingVersion || state?.sleepAttempt == nil) &&
             RemoteAuthentication.isValid(
                 signature: signature,
                 payload: canonicalPayload,
