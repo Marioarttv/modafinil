@@ -34,6 +34,20 @@ final class WakeSchedulerTests: XCTestCase {
         XCTAssertEqual(backend.events, unrelated)
     }
 
+    func testUncancellableExpiredRecordDoesNotBlockNewWakeOrCancellation() throws {
+        let backend = Backend()
+        let expired = event(-60)
+        let unrelated = event(500, owner: "other.app")
+        backend.events = [expired, unrelated, event(120)]
+        backend.failRemove = expired
+        try backend.scheduler.schedule(now.addingTimeInterval(900), now: now)
+        XCTAssertEqual(backend.events, [expired, unrelated, event(900)])
+        XCTAssertEqual(backend.scheduler.scheduledDate(now: now), event(900).date)
+        try backend.scheduler.cancel(now: now)
+        XCTAssertEqual(backend.events, [expired, unrelated])
+        XCTAssertNil(backend.scheduler.scheduledDate(now: now))
+    }
+
     func testInvalidDatesNeverChangeTheQueue() {
         let backend = Backend()
         backend.events = [event(600)]

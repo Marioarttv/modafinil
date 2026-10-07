@@ -59,13 +59,13 @@ restored and both test timers were cleared. Because power was connected during
 sleep, this validates the sleep path and recovery but is not an isolated proof
 of the scheduled wake source.
 
-## Companion wake recovery (Mac 0.4.0 / Companion 1.5)
+## Companion wake recovery (Mac 0.4.1 / Companion 1.5)
 
 Protocol v4 signs the Mac's current private Wi-Fi and hardware wake addresses.
 The phone refreshes its existing Keychain pairing from verified responses; it
 preserves both secrets and all endpoints. The Mac prefers live addresses over
 stale saved targets, retaining configured extra interfaces up to four total.
-Install Mac 0.4.0 before Companion 1.5. Existing v1/v2/v3 phones and the iPad's
+Install Mac 0.4.1 before Companion 1.5. Existing v1/v2/v3 phones and the iPad's
 v1 relay retain their original protocol and response signatures.
 
 The phone allows 60 seconds for network recovery and sends at most four signed
@@ -75,7 +75,12 @@ explicit local change, cancellation or quit. Each wake still receives only the
 existing 90-second provisional keep-awake lease, which can temporarily extend
 background awake time. There is no new idle polling or permanent keep-awake.
 
-Validation on 2026-10-07: 45 Mac Swift tests passed, the signed build was installed,
+Mac 0.4.1 also ignores already-fired records retained by macOS when replacing
+or cancelling future wake alarms. Attempting to cancel such an expired record
+returns IOKit Not Found and previously rolled back a valid replacement alarm.
+Active Modafinil alarms and other apps' events remain protected.
+
+Validation on 2026-10-07: 46 Mac Swift tests passed, the signed build was installed,
 and a native one-minute timer produced kernel-confirmed sleep at 12:21:26 and a
 later wake at 12:21:55 with recovery authorization retained. Provisional keep-awake
 expired as intended. The wake was not isolated magic-packet proof. The paired
