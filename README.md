@@ -79,7 +79,7 @@ Validation on 2026-10-07: 45 Mac Swift tests passed, the signed build was instal
 and a native one-minute timer produced kernel-confirmed sleep at 12:21:26 and a
 later wake at 12:21:55 with recovery authorization retained. Provisional keep-awake
 expired as intended. The wake was not isolated magic-packet proof. The paired
-Companion build passes 28 tests, including late reconnect and signed address
+Companion build passes 29 tests, including late reconnect and signed address
 updates. Installing the new Signulous IPA and a physical cellular/closed-lid AC
 cycle remain user acceptance. Investigation and artifact recovery are recorded
 in the companion repository's `docs/wake-recovery-2026-10-07.md`.
