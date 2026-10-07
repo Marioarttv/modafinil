@@ -45,7 +45,9 @@ public final class WakeScheduler {
     public func schedule(_ date: Date, now: Date = Date()) throws {
         try Self.validate(date, now: now)
         let replacement = ScheduledPowerEvent(date: date, owner: Self.owner, type: kIOPMAutoWake)
-        let previous = ownedEvents
+        // macOS may retain already-fired events whose cancellation returns
+        // kIOReturnNotFound. They must not roll back a valid new alarm.
+        let previous = ownedEvents.filter { $0.date > now }
         if previous == [replacement] { return }
 
         // Add before removing, so a failed schedule never loses the old alarm.
@@ -70,8 +72,8 @@ public final class WakeScheduler {
         }
     }
 
-    public func cancel() throws {
-        for event in ownedEvents { try remove(event) }
+    public func cancel(now: Date = Date()) throws {
+        for event in ownedEvents where event.date > now { try remove(event) }
     }
 
     private var ownedEvents: [ScheduledPowerEvent] {
