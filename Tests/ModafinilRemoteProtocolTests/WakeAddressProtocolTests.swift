@@ -61,7 +61,7 @@ final class WakeAddressProtocolTests: XCTestCase {
     }
     func testInvalidWakeAddressesCannotReplaceThePairing() {
         for targets in ["", "ff:ff:ff:ff:ff:ff", "01:00:5e:00:00:01", "00:00:00:00:00:00",
-            "02:11:22:33:44:55,", "+2:11:22:33:44:55", "02:11:22:33:44", Array(repeating: "02:11:22:33:44:55", count: 5).joined(separator: ",")] {
+            "02:11:22:33:44:55,", "+2:11:22:33:44:55", "02:11:22:33:44", "02:11:22:33:44:55:zz", ":02:11:22:33:44:55", Array(repeating: "02:11:22:33:44:55", count: 5).joined(separator: ",")] {
             XCTAssertNil(PairingConfiguration.normalizedWakeTargets(targets))
         }
     }

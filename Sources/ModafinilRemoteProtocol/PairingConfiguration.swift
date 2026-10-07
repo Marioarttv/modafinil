@@ -117,6 +117,7 @@ public struct PairingConfiguration: Codable, Equatable, Sendable {
         for candidate in candidates {
             let address = candidate.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let parts = address.split(separator: ":", omittingEmptySubsequences: false)
+            guard parts.count == 6 else { return nil }
             let bytes = parts.compactMap { part -> UInt8? in
                 guard part.count == 2, part.allSatisfy({ "0123456789abcdefABCDEF".contains($0) }) else { return nil }
                 return UInt8(part, radix: 16)
