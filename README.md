@@ -59,6 +59,31 @@ restored and both test timers were cleared. Because power was connected during
 sleep, this validates the sleep path and recovery but is not an isolated proof
 of the scheduled wake source.
 
+## Companion wake recovery (Mac 0.4.0 / Companion 1.5)
+
+Protocol v4 signs the Mac's current private Wi-Fi and hardware wake addresses.
+The phone refreshes its existing Keychain pairing from verified responses; it
+preserves both secrets and all endpoints. The Mac prefers live addresses over
+stale saved targets, retaining configured extra interfaces up to four total.
+Install Mac 0.4.0 before Companion 1.5. Existing v1/v2/v3 phones and the iPad's
+v1 relay retain their original protocol and response signatures.
+
+The phone allows 60 seconds for network recovery and sends at most four signed
+relay wake requests during that foreground attempt. Sleep timers now arm remote
+recovery, and maintenance wakes retain the authorization until Keep Awake or an
+explicit local change, cancellation or quit. Each wake still receives only the
+existing 90-second provisional keep-awake lease, which can temporarily extend
+background awake time. There is no new idle polling or permanent keep-awake.
+
+Validation on 2026-10-07: 45 Mac Swift tests passed, the signed build was installed,
+and a native one-minute timer produced kernel-confirmed sleep at 12:21:26 and a
+later wake at 12:21:55 with recovery authorization retained. Provisional keep-awake
+expired as intended. The wake was not isolated magic-packet proof. The paired
+Companion build passes 28 tests, including late reconnect and signed address
+updates. Installing the new Signulous IPA and a physical cellular/closed-lid AC
+cycle remain user acceptance. Investigation and artifact recovery are recorded
+in the companion repository's `docs/wake-recovery-2026-10-07.md`.
+
 ## Wake timer
 
 Use **Wake Timer** in the Mac window or menu bar popover to pick a one-time

@@ -120,9 +120,7 @@ final class CompanionConfigurationStore {
             macPort: Self.macPort,
             relayHost: relayHost,
             relayPort: relayPort,
-            targetMAC: configuredTargetMACs ??
-                networkInformation.wifiMACAddress ??
-                "",
+            targetMAC: networkInformation.wakeTargetMACs(configured: configuredTargetMACs) ?? "",
             secret: secret,
             relaySecret: relaySecret
         )

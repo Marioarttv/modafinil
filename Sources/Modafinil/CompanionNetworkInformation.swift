@@ -1,18 +1,36 @@
 import Darwin
 import Foundation
+import ModafinilRemoteProtocol
 
 struct CompanionNetworkInformation {
     let tailscaleIPv4: String?
     let wifiInterface: String?
     let wifiMACAddress: String?
+    let wifiHardwareMACAddress: String?
 
     static func discover() -> Self {
-        let wifiInterface = discoverWiFiInterface()
+        let wifi = discoverWiFiInterface()
         return Self(
             tailscaleIPv4: discoverTailscaleIPv4(),
-            wifiInterface: wifiInterface,
-            wifiMACAddress: wifiInterface.flatMap(currentMACAddress)
+            wifiInterface: wifi?.interface,
+            wifiMACAddress: wifi.flatMap { currentMACAddress(interface: $0.interface) },
+            wifiHardwareMACAddress: wifi?.hardwareMAC
         )
+    }
+
+    /// Prefer the live per-network address, retain the hardware fallback, then
+    /// preserve configured extra interfaces within the relay's four-target cap.
+    func wakeTargetMACs(configured: String? = nil) -> String? {
+        var addresses: [String] = []
+        let candidates = [wifiMACAddress, wifiHardwareMACAddress].compactMap { $0 }
+            + (configured?.components(separatedBy: ",") ?? [])
+        for candidate in candidates {
+            guard let valid = PairingConfiguration.normalizedWakeTargets(candidate),
+                  !addresses.contains(valid) else { continue }
+            addresses.append(valid)
+            if addresses.count == 4 { break }
+        }
+        return addresses.isEmpty ? nil : addresses.joined(separator: ",")
     }
 
     private static func discoverTailscaleIPv4() -> String? {
@@ -62,7 +80,7 @@ struct CompanionNetworkInformation {
         return octets[0] == 100 && (64...127).contains(octets[1])
     }
 
-    private static func discoverWiFiInterface() -> String? {
+    private static func discoverWiFiInterface() -> (interface: String, hardwareMAC: String?)? {
         guard let output = try? Shell.run(
             "/usr/sbin/networksetup",
             ["-listallhardwareports"]
@@ -76,10 +94,13 @@ struct CompanionNetworkInformation {
                 continue
             }
 
-            return lines
-                .first { $0.hasPrefix("Device: ") }?
-                .dropFirst("Device: ".count)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let interface = lines.first(where: { $0.hasPrefix("Device: ") })?
+                .dropFirst("Device: ".count).trimmingCharacters(in: .whitespacesAndNewlines)
+            else { continue }
+            let hardwareMAC = lines.first(where: { $0.hasPrefix("Ethernet Address: ") })?
+                .dropFirst("Ethernet Address: ".count).trimmingCharacters(in: .whitespacesAndNewlines)
+            return (interface, hardwareMAC)
+
         }
 
         return nil
