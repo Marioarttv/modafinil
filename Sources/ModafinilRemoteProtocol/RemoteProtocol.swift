@@ -33,6 +33,7 @@ public struct RemoteState: Codable, Equatable, Sendable {
     public let scheduledSleepAt: Int64?
     public let scheduledWakeAt: Int64?
     public let sleepAttempt: RemoteSleepAttempt?
+    public let wakeTargetMACs: String?
 
     public init(
         awakeRequested: Bool,
@@ -40,7 +41,8 @@ public struct RemoteState: Codable, Equatable, Sendable {
         serverName: String,
         scheduledSleepAt: Int64? = nil,
         scheduledWakeAt: Int64? = nil,
-        sleepAttempt: RemoteSleepAttempt? = nil
+        sleepAttempt: RemoteSleepAttempt? = nil,
+        wakeTargetMACs: String? = nil
     ) {
         self.awakeRequested = awakeRequested
         self.sleepPreventionEffective = sleepPreventionEffective
@@ -48,6 +50,7 @@ public struct RemoteState: Codable, Equatable, Sendable {
         self.scheduledSleepAt = scheduledSleepAt
         self.scheduledWakeAt = scheduledWakeAt
         self.sleepAttempt = sleepAttempt
+        self.wakeTargetMACs = wakeTargetMACs
     }
 }
 
@@ -56,7 +59,8 @@ public struct RemoteRequest: Codable, Equatable, Sendable {
     public static let currentVersion = 1
     public static let wakeSchedulingVersion = 2
     public static let sleepTrackingVersion = 3
-    public static let supportedVersions: Set<Int> = [1, 2, 3]
+    public static let wakeRecoveryVersion = 4
+    public static let supportedVersions: Set<Int> = [1, 2, 3, 4]
 
     public let version: Int
     public let requestID: String
@@ -139,7 +143,8 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
     public static let currentVersion = 1
     public static let wakeSchedulingVersion = 2
     public static let sleepTrackingVersion = 3
-    public static let supportedVersions: Set<Int> = [1, 2, 3]
+    public static let wakeRecoveryVersion = 4
+    public static let supportedVersions: Set<Int> = [1, 2, 3, 4]
 
     public let version: Int
     public let requestID: String
@@ -182,7 +187,8 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
                         sleepPreventionEffective: $0.sleepPreventionEffective,
                         serverName: $0.serverName, scheduledSleepAt: $0.scheduledSleepAt,
                         scheduledWakeAt: version >= 2 ? $0.scheduledWakeAt : nil,
-                        sleepAttempt: version >= 3 ? $0.sleepAttempt : nil)
+                        sleepAttempt: version >= 3 ? $0.sleepAttempt : nil,
+                        wakeTargetMACs: version >= 4 ? $0.wakeTargetMACs : nil)
         }
         let unsigned = Self(
             version: version,
@@ -249,6 +255,7 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
         Self.supportedVersions.contains(version) &&
             (version >= Self.wakeSchedulingVersion || state?.scheduledWakeAt == nil) &&
             (version >= Self.sleepTrackingVersion || state?.sleepAttempt == nil) &&
+            (version >= Self.wakeRecoveryVersion || state?.wakeTargetMACs == nil) &&
             RemoteAuthentication.isValid(
                 signature: signature,
                 payload: canonicalPayload,

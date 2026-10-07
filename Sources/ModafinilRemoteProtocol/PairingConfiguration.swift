@@ -100,14 +100,46 @@ public struct PairingConfiguration: Codable, Equatable, Sendable {
         return components.url!
     }
 
+    /// Only call with targets from a verified response from the paired Mac.
+    public func updatingWakeTargets(_ targets: String) throws -> Self {
+        guard let normalized = Self.normalizedWakeTargets(targets) else {
+            throw PairingError.invalidWakeTargets
+        }
+        return Self(displayName: displayName, macHost: macHost, macPort: macPort,
+            relayHost: relayHost, relayPort: relayPort, targetMAC: normalized,
+            secret: secret, relaySecret: relaySecret)
+    }
+
+    public static func normalizedWakeTargets(_ targets: String) -> String? {
+        let candidates = targets.split(separator: ",", omittingEmptySubsequences: false)
+        guard (1...4).contains(candidates.count) else { return nil }
+        var result: [String] = []
+        for candidate in candidates {
+            let address = candidate.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let parts = address.split(separator: ":", omittingEmptySubsequences: false)
+            guard parts.count == 6 else { return nil }
+            let bytes = parts.compactMap { part -> UInt8? in
+                guard part.count == 2, part.allSatisfy({ "0123456789abcdefABCDEF".contains($0) }) else { return nil }
+                return UInt8(part, radix: 16)
+            }
+            guard bytes.count == 6, bytes[0] & 1 == 0,
+                  bytes.contains(where: { $0 != 0 }) else { return nil }
+            if !result.contains(address) { result.append(address) }
+        }
+        return result.joined(separator: ",")
+    }
+
     public enum PairingError: LocalizedError {
         case invalidLink
         case missingConfiguration
+        case invalidWakeTargets
 
         public var errorDescription: String? {
             switch self {
             case .invalidLink:
                 return "This is not a Modafinil pairing link."
+            case .invalidWakeTargets:
+                return "The Mac returned an invalid wake address list."
             case .missingConfiguration:
                 return "The pairing link is incomplete or invalid."
             }

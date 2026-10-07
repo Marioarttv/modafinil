@@ -185,7 +185,8 @@ final class AppDelegate: NSObject,
     private func activateProvisionalWakeLease() {
         guard companionConfigurationStore.isWakeArmed else { return }
 
-        companionConfigurationStore.isWakeArmed = false
+        // A maintenance/dark wake is not the travelling phone's confirmation.
+        // Retain the authorization until Keep Awake or an explicit local change.
         isProvisionalWakeLeaseActive = true
         scheduleProvisionalWakeLeaseExpiration()
         reconcileSleepPreventionWithCurrentMode()
@@ -759,7 +760,9 @@ final class AppDelegate: NSObject,
             self.synchronizeSleepJournal()
             self.refreshIcon()
             switch result {
-            case .success: completion(.success((self.makeRemoteState(), "Sleep timer saved on the Mac.")))
+            case .success:
+                self.companionConfigurationStore.isWakeArmed = true
+                completion(.success((self.makeRemoteState(), "Sleep timer saved on the Mac.")))
             case .failure(let error): completion(.failure(error))
             }
         }
@@ -771,7 +774,9 @@ final class AppDelegate: NSObject,
             self.synchronizeSleepJournal()
             self.refreshIcon()
             switch result {
-            case .success: completion?(.success((self.makeRemoteState(), "The sleep timer is off.")))
+            case .success:
+                self.companionConfigurationStore.isWakeArmed = false
+                completion?(.success((self.makeRemoteState(), "The sleep timer is off.")))
             case .failure(let error):
                 self.lastError = error.localizedDescription
                 self.refreshIcon()
@@ -937,6 +942,8 @@ final class AppDelegate: NSObject,
     }
 
     private func makeRemoteState() -> RemoteState {
+        let wakeTargets = CompanionNetworkInformation.discover()
+            .wakeTargetMACs(configured: companionConfigurationStore.configuredTargetMACs)
         synchronizeSleepJournal()
         synchronizeWakeSchedule()
         return RemoteState(
@@ -950,7 +957,8 @@ final class AppDelegate: NSObject,
                     phase: RemoteSleepAttempt.Phase(rawValue: $0.phase.rawValue)!,
                     sleptAt: $0.sleptAt.map { Int64($0.timeIntervalSince1970) },
                     wokeAt: $0.wokeAt.map { Int64($0.timeIntervalSince1970) }, detail: $0.detail)
-            }
+            },
+            wakeTargetMACs: wakeTargets
         )
     }
 
