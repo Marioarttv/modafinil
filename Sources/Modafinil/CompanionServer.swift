@@ -28,7 +28,45 @@ final class CompanionServer {
         requestVerifier = RemoteRequestVerifier(secret: secret)
     }
 
+    /// Plain-language listener state for the Mac window, reported on the main queue.
+    var statusHandler: ((String) -> Void)?
+
+    private var restartWorkItem: DispatchWorkItem?
+    private var waitingCheck: DispatchWorkItem?
+    private var restartDelay: TimeInterval = 2
+    private var isStopped = false
+
     func start() throws {
+        try queue.sync {
+            isStopped = false
+            try startOnQueue()
+        }
+    }
+
+    /// Restarts the listener if it is not running. Called after every wake.
+    func ensureRunning() {
+        queue.async {
+            guard !self.isStopped, self.listener == nil, self.restartWorkItem == nil else { return }
+            self.restartDelay = 2
+            self.startOrScheduleRestart()
+        }
+    }
+
+    func stop() {
+        queue.async {
+            self.isStopped = true
+            self.restartWorkItem?.cancel()
+            self.restartWorkItem = nil
+            self.waitingCheck?.cancel()
+            self.waitingCheck = nil
+            self.listener?.cancel()
+            self.listener = nil
+            self.activeConnections.values.forEach { $0.cancel() }
+            self.activeConnections.removeAll()
+        }
+    }
+
+    private func startOnQueue() throws {
         guard listener == nil else { return }
 
         let port = NWEndpoint.Port(rawValue: CompanionConfigurationStore.macPort)!
@@ -36,29 +74,70 @@ final class CompanionServer {
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
-        listener.stateUpdateHandler = { [weak self] state in
+        listener.stateUpdateHandler = { [weak self, weak listener] state in
+            guard let self, let listener, self.listener === listener else { return }
             switch state {
+            case .ready:
+                self.restartDelay = 2
+                self.waitingCheck?.cancel()
+                self.waitingCheck = nil
+                self.reportStatus("Listening")
             case .failed(let error):
-                self?.report(error: "Companion listener failed: \(error.localizedDescription)")
-                self?.listener?.cancel()
-                self?.listener = nil
+                self.report(error: "Companion listener failed: \(error.localizedDescription). Restarting…")
+                self.dropListenerAndRestart()
             case .waiting(let error):
-                self?.report(error: "Companion listener is waiting: \(error.localizedDescription)")
+                self.reportStatus("Waiting for network: \(error.localizedDescription)")
+                // A listener stuck waiting is rebuilt rather than trusted to recover.
+                let check = DispatchWorkItem { [weak self] in
+                    guard let self, self.listener === listener else { return }
+                    if case .waiting = listener.state { self.dropListenerAndRestart() }
+                }
+                self.waitingCheck?.cancel()
+                self.waitingCheck = check
+                self.queue.asyncAfter(deadline: .now() + 15, execute: check)
             default:
                 break
             }
         }
         self.listener = listener
+        reportStatus("Starting")
         listener.start(queue: queue)
     }
 
-    func stop() {
-        queue.async {
-            self.listener?.cancel()
-            self.listener = nil
-            self.activeConnections.values.forEach { $0.cancel() }
-            self.activeConnections.removeAll()
+    private func dropListenerAndRestart() {
+        listener?.stateUpdateHandler = nil
+        listener?.cancel()
+        listener = nil
+        waitingCheck?.cancel()
+        waitingCheck = nil
+        scheduleRestart()
+    }
+
+    private func scheduleRestart() {
+        guard !isStopped, restartWorkItem == nil else { return }
+        let delay = restartDelay
+        restartDelay = min(60, restartDelay * 2)
+        reportStatus("Restarting in \(Int(delay)) s")
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.restartWorkItem = nil
+            self.startOrScheduleRestart()
         }
+        restartWorkItem = work
+        queue.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func startOrScheduleRestart() {
+        guard !isStopped else { return }
+        do { try startOnQueue() }
+        catch {
+            report(error: "Companion listener could not start: \(error.localizedDescription)")
+            scheduleRestart()
+        }
+    }
+
+    private func reportStatus(_ status: String) {
+        DispatchQueue.main.async { [weak self] in self?.statusHandler?(status) }
     }
 
     func updateSecret(_ secret: Data) {

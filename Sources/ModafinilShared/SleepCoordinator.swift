@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import notify
 import IOKit
 import IOKit.pwr_mgt
 
@@ -15,6 +16,10 @@ public struct SleepAttempt: Codable, Equatable {
     public var sleptAt: Date?
     public var wokeAt: Date?
     public var detail: String
+    /// "timer" or "request"; nil in journals written before 0.5.0.
+    public var trigger: String? = nil
+    /// True once the first wake after `sleptAt` was recorded or became unknowable.
+    public var wakeResolved: Bool? = nil
 }
 
 public struct SleepSchedule: Codable, Equatable {
@@ -75,6 +80,8 @@ public enum NativeSleep {
 
 public enum SleepJournalStore {
     public static let url = URL(fileURLWithPath: "/Library/Application Support/Modafinil/sleep-journal.json")
+    /// Darwin notification posted after every save, so the app never polls the file.
+    public static let changeNotification = "com.narcotic.modafinil.sleep-journal-changed"
     public static func read() throws -> SleepJournal {
         guard FileManager.default.fileExists(atPath: url.path) else { return SleepJournal() }
         return try JSONDecoder().decode(SleepJournal.self, from: Data(contentsOf: url))
@@ -84,6 +91,7 @@ public enum SleepJournalStore {
         let data = try JSONEncoder().encode(journal)
         try data.write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+        notify_post(changeNotification)
     }
 }
 
@@ -97,17 +105,43 @@ public final class SleepCoordinator {
     private let disablePrevention: () throws -> Void
     private let requestSleep: () throws -> Void
     private let save: (SleepJournal) throws -> Void
+    private let failureHint: () -> String?
     public var hasWork: Bool { journal.schedule != nil || journal.attempt?.phase == .pending }
+
+    /// How the helper should wake itself: never, once at the timer date, or every
+    /// second only during the short sleep-verification window.
+    public enum TimerMode: Equatable { case idle, deadline(Date), verifying }
+    public var timerMode: TimerMode {
+        if journal.attempt?.phase == .pending || isAwaitingFirstWake { return .verifying }
+        if let schedule = journal.schedule { return .deadline(schedule.date) }
+        return .idle
+    }
+
+    /// Sleep confirmed before macOS actually stopped the CPU: the next tick runs at
+    /// the first wake. Journals from before 0.5.0 (no trigger) never tick for this.
+    private var isAwaitingFirstWake: Bool {
+        guard let attempt = journal.attempt else { return false }
+        return attempt.phase == .confirmed && attempt.wokeAt == nil && attempt.sleptAt != nil
+            && attempt.wakeResolved != true && attempt.trigger != nil
+    }
+
+    /// Wall-clock deadline for the timer: the earlier of its date and its
+    /// continuous-time deadline, so a clock set backwards cannot delay it.
+    public func timerDeadline(now: Date, continuousNow: TimeInterval) -> Date? {
+        guard let schedule = journal.schedule else { return nil }
+        return min(schedule.date, now.addingTimeInterval(max(0, schedule.continuousDeadline - continuousNow)))
+    }
 
     public init(journal: SleepJournal = .init(), now: @escaping () -> Date = Date.init,
                 continuous: @escaping () -> TimeInterval = { SystemSleepTimes.continuousTime },
                 powerTimes: @escaping () throws -> SystemSleepTimes = SystemSleepTimes.read,
                 disablePrevention: @escaping () throws -> Void,
                 requestSleep: @escaping () throws -> Void = NativeSleep.request,
-                save: @escaping (SleepJournal) throws -> Void = SleepJournalStore.write) {
+                save: @escaping (SleepJournal) throws -> Void = SleepJournalStore.write,
+                failureHint: @escaping () -> String? = { nil }) {
         self.journal = journal; self.now = now; self.continuous = continuous
         self.powerTimes = powerTimes; self.disablePrevention = disablePrevention
-        self.requestSleep = requestSleep; self.save = save
+        self.requestSleep = requestSleep; self.save = save; self.failureHint = failureHint
     }
 
     public func restore() throws {
@@ -167,14 +201,14 @@ public final class SleepCoordinator {
         try persist()
     }
 
-    public func begin() throws {
+    public func begin(trigger: String = "request") throws {
         let times = try powerTimes()
         try disablePrevention()
         let time = continuous()
         journal.schedule = nil
         journal.attempt = SleepAttempt(id: UUID().uuidString, requestedAt: now(), baselineSleep: times.slept,
             deadline: time + 32, nextAttempt: time + 2, attempts: 0, phase: .pending,
-            detail: "Sleep requested. Waiting for macOS to enter sleep.")
+            detail: "Sleep requested. Waiting for macOS to enter sleep.", trigger: trigger)
         do { try persist() } // Durable receipt before acknowledging or issuing a power request.
         catch {
             journal.attempt?.phase = .failed
@@ -196,7 +230,8 @@ public final class SleepCoordinator {
                         baselineSleep: times.slept, deadline: time, nextAttempt: time, attempts: 0,
                         phase: .confirmed, sleptAt: Date(timeIntervalSince1970: times.slept),
                         wokeAt: Date(timeIntervalSince1970: times.woke),
-                        detail: "The Mac was already asleep when the timer elapsed; it has since woken.")
+                        detail: "The Mac was already asleep when the timer elapsed; it has since woken.",
+                        trigger: "timer", wakeResolved: true)
                     try persist()
                 } else if time - schedule.continuousDeadline > 60 || now().timeIntervalSince(schedule.date) > 60 {
                     journal.schedule = nil
@@ -204,7 +239,7 @@ public final class SleepCoordinator {
                         baselineSleep: times.slept, deadline: time, nextAttempt: time, attempts: 0,
                         phase: .failed, detail: "The sleep timer was missed by more than a minute. Request sleep again.")
                     try persist()
-                } else { try begin() }
+                } else { try begin(trigger: "timer") }
             }
             guard var attempt = journal.attempt else { return }
             if attempt.phase == .pending {
@@ -218,6 +253,7 @@ public final class SleepCoordinator {
                 } else if time >= attempt.deadline {
                     attempt.phase = .failed
                     attempt.detail = "macOS did not enter sleep within 30 seconds of the first attempt. No further retries will run. Background activity or macOS may be delaying sleep."
+                    if let hint = failureHint() { attempt.detail += " " + hint }
                 } else if time >= attempt.nextAttempt, attempt.attempts < 3 {
                     attempt.attempts += 1
                     attempt.nextAttempt = time + 10
@@ -227,9 +263,19 @@ public final class SleepCoordinator {
                     return
                 }
             }
-            if let sleptAt = attempt.sleptAt, times.woke >= sleptAt.timeIntervalSince1970 {
-                attempt.wokeAt = Date(timeIntervalSince1970: times.woke)
-                attempt.detail = "Sleep was confirmed; macOS subsequently woke (background or full wake)."
+            // kern.waketime is the first wake after a sleep only while kern.sleeptime
+            // still names that sleep. Record it once; never overwrite it later.
+            if attempt.phase == .confirmed, attempt.wokeAt == nil, attempt.wakeResolved != true,
+               let sleptAt = attempt.sleptAt {
+                if abs(times.slept - sleptAt.timeIntervalSince1970) < 0.5 {
+                    if times.woke >= times.slept {
+                        attempt.wokeAt = Date(timeIntervalSince1970: times.woke)
+                        attempt.wakeResolved = true
+                        attempt.detail = "Sleep was confirmed; macOS subsequently woke (background or full wake)."
+                    }
+                } else {
+                    attempt.wakeResolved = true // A later sleep replaced the evidence.
+                }
             }
             if journal.attempt != attempt { journal.attempt = attempt; try persist() }
         } catch {

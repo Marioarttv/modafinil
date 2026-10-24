@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ModafinilShared
 
 final class CodexRuntimeMonitor {
     func isCodexRunning() -> Bool {
@@ -25,12 +26,8 @@ final class CodexRuntimeMonitor {
             || value.contains("codex.")
     }
 
+    /// Same match as `pgrep -ix codex`, without spawning a process every check.
     private func isCodexCommandRunning() -> Bool {
-        do {
-            _ = try Shell.run("/usr/bin/pgrep", ["-ix", "codex"])
-            return true
-        } catch {
-            return false
-        }
+        SleepBlockers.isProcessRunning(named: "codex")
     }
 }

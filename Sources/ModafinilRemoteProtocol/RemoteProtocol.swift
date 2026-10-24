@@ -11,6 +11,102 @@ public enum RemoteCommand: String, Codable, Sendable {
     case scheduleWake
     case cancelScheduledWake
     case wake
+    /// Protocol v5: argument "<from>-<to>" in Unix seconds.
+    case history
+}
+
+/// One stretch of the Mac's power state. Short keys keep pages small.
+public struct RemoteHistorySegment: Codable, Equatable, Sendable {
+    public enum Kind: String, Codable, Sendable { case awake, background, asleep, unknown }
+    public let start: Int64
+    public let end: Int64
+    public let kind: Kind
+    public let reason: String
+    /// Wake cause identifier for wake segments (e.g. "network", "maintenance").
+    public let cause: String?
+
+    public init(start: Int64, end: Int64, kind: Kind, reason: String, cause: String? = nil) {
+        self.start = start; self.end = end; self.kind = kind; self.reason = reason; self.cause = cause
+    }
+
+    enum CodingKeys: String, CodingKey { case start = "s", end = "e", kind = "k", reason = "r", cause = "c" }
+}
+
+/// A Modafinil action, such as turning keep-awake on from the iPhone.
+public struct RemoteHistoryMarker: Codable, Equatable, Sendable {
+    public let at: Int64
+    public let text: String
+    public init(at: Int64, text: String) { self.at = at; self.text = text }
+    enum CodingKeys: String, CodingKey { case at = "t", text = "m" }
+}
+
+public struct RemoteHistory: Codable, Equatable, Sendable {
+    public static let maximumRange: Int64 = 8 * 24 * 3600
+
+    public let from: Int64
+    public let to: Int64
+    /// Newest first. When `complete` is false, request again with `to = oldest`.
+    public let segments: [RemoteHistorySegment]
+    public let markers: [RemoteHistoryMarker]
+    public let complete: Bool
+    /// Start of the oldest returned item; the next page ends here.
+    public let oldest: Int64
+
+    public init(from: Int64, to: Int64, segments: [RemoteHistorySegment],
+                markers: [RemoteHistoryMarker], complete: Bool, oldest: Int64) {
+        self.from = from; self.to = to; self.segments = segments
+        self.markers = markers; self.complete = complete; self.oldest = oldest
+    }
+
+    public static func argument(from: Int64, to: Int64) -> String { "\(from)-\(to)" }
+
+    /// Builds one newest-first page whose JSON stays within `budget` bytes, so a
+    /// signed response always fits in `RemoteWireCodec.maximumMessageSize`.
+    /// Pages are cut only at segment starts, so consecutive pages never leave gaps.
+    public static func page(from: Int64, to: Int64, segments: [RemoteHistorySegment],
+                            markers: [RemoteHistoryMarker], budget: Int = 11_000) -> RemoteHistory {
+        let sortedSegments = segments.sorted { $0.start > $1.start }
+        let sortedMarkers = markers.sorted { $0.at > $1.at }
+        func build(_ count: Int) -> RemoteHistory {
+            guard count < sortedSegments.count else {
+                return RemoteHistory(from: from, to: to, segments: sortedSegments,
+                                     markers: sortedMarkers, complete: true, oldest: from)
+            }
+            var included = Array(sortedSegments.prefix(max(1, count)))
+            let oldest = included.last!.start
+            // Keep every segment that starts in the same second as the cut.
+            included += sortedSegments.dropFirst(included.count).prefix { $0.start == oldest }
+            return RemoteHistory(from: from, to: to, segments: included,
+                                 markers: sortedMarkers.filter { $0.at >= oldest },
+                                 complete: false, oldest: oldest)
+        }
+        let encoder = JSONEncoder()
+        var count = sortedSegments.count
+        var result = build(count)
+        while count > 1, ((try? encoder.encode(result))?.count ?? .max) > budget {
+            count = max(1, count * 3 / 4)
+            result = build(count)
+        }
+        return result
+    }
+
+    public static func parseRange(_ argument: String, now: Int64 = Int64(Date().timeIntervalSince1970)) -> (from: Int64, to: Int64)? {
+        let parts = argument.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 2, let from = Int64(parts[0]), let to = Int64(parts[1]),
+              from >= 0, from < to, to <= now + 300, to - from <= maximumRange else { return nil }
+        return (from, to)
+    }
+}
+
+/// An app or system process holding a power assertion on the Mac.
+public struct RemoteSleepBlocker: Codable, Equatable, Sendable {
+    /// "systemSleep", "idleSleep", "display", "background" or "userActive".
+    public let effect: String
+    public let name: String
+    public let detail: String?
+    public init(effect: String, name: String, detail: String? = nil) {
+        self.effect = effect; self.name = name; self.detail = detail
+    }
 }
 
 public struct RemoteSleepAttempt: Codable, Equatable, Sendable {
@@ -34,6 +130,8 @@ public struct RemoteState: Codable, Equatable, Sendable {
     public let scheduledWakeAt: Int64?
     public let sleepAttempt: RemoteSleepAttempt?
     public let wakeTargetMACs: String?
+    public let blockers: [RemoteSleepBlocker]?
+    public let history: RemoteHistory?
 
     public init(
         awakeRequested: Bool,
@@ -42,7 +140,9 @@ public struct RemoteState: Codable, Equatable, Sendable {
         scheduledSleepAt: Int64? = nil,
         scheduledWakeAt: Int64? = nil,
         sleepAttempt: RemoteSleepAttempt? = nil,
-        wakeTargetMACs: String? = nil
+        wakeTargetMACs: String? = nil,
+        blockers: [RemoteSleepBlocker]? = nil,
+        history: RemoteHistory? = nil
     ) {
         self.awakeRequested = awakeRequested
         self.sleepPreventionEffective = sleepPreventionEffective
@@ -51,6 +151,8 @@ public struct RemoteState: Codable, Equatable, Sendable {
         self.scheduledWakeAt = scheduledWakeAt
         self.sleepAttempt = sleepAttempt
         self.wakeTargetMACs = wakeTargetMACs
+        self.blockers = blockers
+        self.history = history
     }
 }
 
@@ -60,7 +162,8 @@ public struct RemoteRequest: Codable, Equatable, Sendable {
     public static let wakeSchedulingVersion = 2
     public static let sleepTrackingVersion = 3
     public static let wakeRecoveryVersion = 4
-    public static let supportedVersions: Set<Int> = [1, 2, 3, 4]
+    public static let sleepHistoryVersion = 5
+    public static let supportedVersions: Set<Int> = [1, 2, 3, 4, 5]
 
     public let version: Int
     public let requestID: String
@@ -144,7 +247,8 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
     public static let wakeSchedulingVersion = 2
     public static let sleepTrackingVersion = 3
     public static let wakeRecoveryVersion = 4
-    public static let supportedVersions: Set<Int> = [1, 2, 3, 4]
+    public static let sleepHistoryVersion = 5
+    public static let supportedVersions: Set<Int> = [1, 2, 3, 4, 5]
 
     public let version: Int
     public let requestID: String
@@ -188,7 +292,9 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
                         serverName: $0.serverName, scheduledSleepAt: $0.scheduledSleepAt,
                         scheduledWakeAt: version >= 2 ? $0.scheduledWakeAt : nil,
                         sleepAttempt: version >= 3 ? $0.sleepAttempt : nil,
-                        wakeTargetMACs: version >= 4 ? $0.wakeTargetMACs : nil)
+                        wakeTargetMACs: version >= 4 ? $0.wakeTargetMACs : nil,
+                        blockers: version >= 5 ? $0.blockers : nil,
+                        history: version >= 5 ? $0.history : nil)
         }
         let unsigned = Self(
             version: version,
@@ -256,6 +362,7 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
             (version >= Self.wakeSchedulingVersion || state?.scheduledWakeAt == nil) &&
             (version >= Self.sleepTrackingVersion || state?.sleepAttempt == nil) &&
             (version >= Self.wakeRecoveryVersion || state?.wakeTargetMACs == nil) &&
+            (version >= Self.sleepHistoryVersion || (state?.blockers == nil && state?.history == nil)) &&
             RemoteAuthentication.isValid(
                 signature: signature,
                 payload: canonicalPayload,
@@ -319,7 +426,8 @@ public final class RemoteRequestVerifier: @unchecked Sendable {
         now: Int64 = Int64(Date().timeIntervalSince1970)
     ) throws {
         guard RemoteRequest.supportedVersions.contains(request.version),
-              (request.version >= 2 || ![RemoteCommand.scheduleWake, .cancelScheduledWake].contains(request.command)) else {
+              (request.version >= 2 || ![RemoteCommand.scheduleWake, .cancelScheduledWake].contains(request.command)),
+              (request.version >= RemoteRequest.sleepHistoryVersion || request.command != .history) else {
             throw VerificationError.unsupportedVersion
         }
         guard UUID(uuidString: request.requestID) != nil else {
