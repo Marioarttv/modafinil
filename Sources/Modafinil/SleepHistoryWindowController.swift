@@ -77,8 +77,8 @@ final class SleepHistoryWindowController: NSWindowController, NSWindowDelegate, 
         timelineView.translatesAutoresizingMaskIntoConstraints = false
         timelineView.heightAnchor.constraint(equalToConstant: 44).isActive = true
 
-        for (identifier, title, width) in [("time", "Time", 150.0), ("length", "Length", 80.0),
-                                           ("state", "State", 120.0), ("reason", "Why", 320.0)] {
+        for (identifier, title, width) in [("time", "Time", 190.0), ("length", "Length", 90.0),
+                                           ("state", "State", 130.0), ("reason", "Why", 300.0)] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier))
             column.title = title
             column.width = width
@@ -190,7 +190,7 @@ final class SleepHistoryWindowController: NSWindowController, NSWindowDelegate, 
         label.font = .systemFont(ofSize: 12)
         switch identifier {
         case "time":
-            let start = item.start.formatted(date: .abbreviated, time: .shortened)
+            let start = item.start.formatted(.dateTime.weekday(.abbreviated).day().hour().minute())
             label.stringValue = item.end.map { "\(start) – \($0.formatted(date: .omitted, time: .shortened))" } ?? start
             label.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         case "length":
