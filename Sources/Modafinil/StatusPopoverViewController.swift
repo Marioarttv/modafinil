@@ -1,4 +1,5 @@
 import AppKit
+import ModafinilShared
 
 protocol StatusPopoverViewControllerDelegate: AnyObject {
     func statusPopoverDidToggleSleepPrevention(_ viewController: StatusPopoverViewController)
@@ -10,6 +11,8 @@ protocol StatusPopoverViewControllerDelegate: AnyObject {
     func statusPopoverDidOpenCompanionSetup(_ viewController: StatusPopoverViewController)
     func statusPopoverDidOpenBackgroundSettings(_ viewController: StatusPopoverViewController)
     func statusPopoverDidQuit(_ viewController: StatusPopoverViewController)
+    func statusPopoverDidOpenSleepHistory(_ viewController: StatusPopoverViewController)
+    func statusPopoverDidToggleLoginItem(_ viewController: StatusPopoverViewController)
 }
 
 final class StatusPopoverViewController: NSViewController {
@@ -55,6 +58,10 @@ final class StatusPopoverViewController: NSViewController {
         let scheduledWakeDate: Date?
         let canScheduleWake: Bool
         let lastError: String?
+        let loginItemStatus: String
+        let isLoginItemEnabled: Bool
+        let companionStatus: String
+        let blockers: [SleepBlocker]
     }
 
     weak var delegate: StatusPopoverViewControllerDelegate?
@@ -68,6 +75,11 @@ final class StatusPopoverViewController: NSViewController {
     private let codexLimitValueLabel = NSTextField(labelWithString: "")
     private let codexValueLabel = NSTextField(labelWithString: "")
     private let helperValueLabel = NSTextField(labelWithString: "")
+    private let loginItemValueLabel = NSTextField(labelWithString: "")
+    private let companionValueLabel = NSTextField(labelWithString: "")
+    private let blockersLabel = NSTextField(wrappingLabelWithString: "")
+    private let loginItemButton = NSButton(checkboxWithTitle: "Open at login", target: nil, action: nil)
+    private let historyButton = NSButton(title: "Sleep History…", target: nil, action: nil)
     private let errorLabel = NSTextField(labelWithString: "")
     private let primaryButton = NSButton(title: "", target: nil, action: nil)
     private let codexLimitButton = NSButton(
@@ -163,6 +175,8 @@ final class StatusPopoverViewController: NSViewController {
         detailsStack.addArrangedSubview(makeStatusRow(title: "Codex limit", valueLabel: codexLimitValueLabel))
         detailsStack.addArrangedSubview(makeStatusRow(title: "Codex", valueLabel: codexValueLabel))
         detailsStack.addArrangedSubview(makeStatusRow(title: "Helper", valueLabel: helperValueLabel))
+        detailsStack.addArrangedSubview(makeStatusRow(title: "iPhone access", valueLabel: companionValueLabel))
+        detailsStack.addArrangedSubview(makeStatusRow(title: "Open at login", valueLabel: loginItemValueLabel))
         contentStack.addArrangedSubview(detailsStack)
 
         errorLabel.font = .systemFont(ofSize: 12)
@@ -177,6 +191,8 @@ final class StatusPopoverViewController: NSViewController {
         contentStack.addArrangedSubview(makeSleepTimerView())
         contentStack.addArrangedSubview(makeSeparator())
         contentStack.addArrangedSubview(makeWakeTimerView())
+        contentStack.addArrangedSubview(makeSeparator())
+        contentStack.addArrangedSubview(makeBlockersView())
         contentStack.addArrangedSubview(makeSeparator())
 
         primaryButton.target = self
@@ -198,6 +214,12 @@ final class StatusPopoverViewController: NSViewController {
         companionSetupButton.action = #selector(companionSetupButtonClicked)
         companionSetupButton.bezelStyle = .rounded
 
+        historyButton.target = self
+        historyButton.action = #selector(historyButtonClicked)
+        historyButton.bezelStyle = .rounded
+        loginItemButton.target = self
+        loginItemButton.action = #selector(loginItemButtonClicked)
+
         quitButton.target = self
         quitButton.action = #selector(quitButtonClicked)
         quitButton.bezelStyle = .rounded
@@ -209,7 +231,8 @@ final class StatusPopoverViewController: NSViewController {
         actionStack.spacing = 8
         actionStack.addArrangedSubview(primaryButton)
         actionStack.addArrangedSubview(codexLimitButton)
-        actionStack.addArrangedSubview(companionSetupButton)
+        actionStack.addArrangedSubview(loginItemButton)
+        actionStack.addArrangedSubview(NSStackView(views: [companionSetupButton, historyButton]))
 
         let secondaryActionStack = NSStackView()
         secondaryActionStack.orientation = .horizontal
@@ -238,6 +261,10 @@ final class StatusPopoverViewController: NSViewController {
         codexLimitValueLabel.stringValue = viewModel.codexLimitStatus
         codexValueLabel.stringValue = viewModel.codexStatus
         helperValueLabel.stringValue = viewModel.helperStatus
+        companionValueLabel.stringValue = viewModel.companionStatus
+        loginItemValueLabel.stringValue = viewModel.loginItemStatus
+        loginItemButton.state = viewModel.isLoginItemEnabled ? .on : .off
+        blockersLabel.stringValue = Self.blockersText(viewModel.blockers)
 
         if let lastError = viewModel.lastError {
             errorLabel.stringValue = "Error: \(lastError)"
@@ -507,6 +534,51 @@ final class StatusPopoverViewController: NSViewController {
 
     @objc private func companionSetupButtonClicked() {
         delegate?.statusPopoverDidOpenCompanionSetup(self)
+    }
+
+    @objc private func historyButtonClicked() {
+        delegate?.statusPopoverDidOpenSleepHistory(self)
+    }
+
+    @objc private func loginItemButtonClicked() {
+        delegate?.statusPopoverDidToggleLoginItem(self)
+    }
+
+    private func makeBlockersView() -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        let heading = NSTextField(labelWithString: "Other apps affecting sleep")
+        heading.font = .systemFont(ofSize: 13, weight: .semibold)
+        stack.addArrangedSubview(heading)
+        blockersLabel.font = .systemFont(ofSize: 12)
+        blockersLabel.preferredMaxLayoutWidth = presentation.width - presentation.contentInset * 2
+        blockersLabel.setAccessibilityIdentifier("sleepBlockers")
+        stack.addArrangedSubview(blockersLabel)
+        let hint = NSTextField(wrappingLabelWithString: "Apps can stop idle sleep while the lid is open. Closing the lid still sleeps the Mac unless Modafinil is on or an external display is connected.")
+        hint.font = .systemFont(ofSize: 11)
+        hint.textColor = .secondaryLabelColor
+        hint.preferredMaxLayoutWidth = presentation.width - presentation.contentInset * 2
+        stack.addArrangedSubview(hint)
+        return stack
+    }
+
+    static func blockersText(_ blockers: [SleepBlocker]) -> String {
+        var lines: [String] = []
+        for blocker in blockers where blocker.effect < .background {
+            let detail = blocker.details.first.map { " (\($0))" } ?? ""
+            lines.append("• \(blocker.processName): \(blocker.effect.title.lowercased())\(detail)")
+        }
+        let background = blockers.filter { $0.effect == .background }.map(\.processName)
+        if !background.isEmpty {
+            let names = background.prefix(4).joined(separator: ", ") + (background.count > 4 ? ", …" : "")
+            lines.append("• macOS background work: \(names)")
+        }
+        if blockers.contains(where: { $0.effect == .userActive }) {
+            lines.append("• You are using the Mac (display on)")
+        }
+        return lines.isEmpty ? "No other app is preventing sleep right now." : lines.joined(separator: "\n")
     }
 
     @objc private func quitButtonClicked() {

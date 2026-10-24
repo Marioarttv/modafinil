@@ -9,6 +9,7 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
     private var activeLeaseIDs = Set<UUID>()
     private var idleExitWorkItem: DispatchWorkItem?
     private var sleepTickTimer: DispatchSourceTimer?
+    private var sleepTimerMode: SleepCoordinator.TimerMode = .idle
     private var sleepJournalLoadError: String?
     private lazy var sleepCoordinator: SleepCoordinator = {
         let journal: SleepJournal
@@ -21,7 +22,7 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
             try self.setSystemSleepPreventionEnabled(false)
             self.activeLeaseIDs.removeAll()
             self.removeOwnershipMarker()
-        })
+        }, failureHint: { SleepBlockers.failureHint() })
     }()
     private let wakeScheduler = WakeScheduler()
     private let ownershipMarkerURL = URL(
@@ -70,6 +71,7 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         stateQueue.async {
             do {
                 try self.sleepCoordinator.cancelPending()
+                self.updateSleepTickTimer()
                 if enabled {
                     do {
                         try self.writeOwnershipMarker()
@@ -110,7 +112,7 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
     ) {
         stateQueue.async {
             do {
-                try self.sleepCoordinator.begin()
+                try self.sleepCoordinator.begin(trigger: "request")
                 self.updateSleepTickTimer()
                 reply(true, nil)
             } catch { reply(false, error.localizedDescription) }
@@ -131,20 +133,37 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         }
     }
 
+    /// Wakes the helper only when needed: once at the timer date (wall clock, so it
+    /// also fires right after a wake if the date passed during sleep), and once per
+    /// second only during the 32-second sleep verification.
     private func updateSleepTickTimer() {
+        let mode = sleepCoordinator.timerMode
+        if mode == sleepTimerMode, sleepTickTimer != nil { return }
         sleepTickTimer?.cancel()
         sleepTickTimer = nil
-        guard sleepCoordinator.hasWork else {
+        sleepTimerMode = mode
+        let timer: DispatchSourceTimer
+        switch mode {
+        case .idle:
             scheduleIdleExitIfNeeded()
             return
+        case .verifying:
+            timer = DispatchSource.makeTimerSource(queue: stateQueue)
+            timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
+        case .deadline(let date):
+            timer = DispatchSource.makeTimerSource(queue: stateQueue)
+            let seconds = date.timeIntervalSince1970
+            let wall = DispatchWallTime(timespec: timespec(
+                tv_sec: Int(seconds.rounded(.down)),
+                tv_nsec: Int((seconds - seconds.rounded(.down)) * 1_000_000_000)))
+            // The repeat only matters if the wall clock moved backwards.
+            timer.schedule(wallDeadline: wall, repeating: 30, leeway: .milliseconds(500))
         }
         cancelIdleExit()
-        let timer = DispatchSource.makeTimerSource(queue: stateQueue)
-        timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             self.sleepCoordinator.tick()
-            if !self.sleepCoordinator.hasWork { self.updateSleepTickTimer() }
+            self.updateSleepTickTimer()
         }
         sleepTickTimer = timer
         timer.resume()

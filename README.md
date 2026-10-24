@@ -59,6 +59,39 @@ restored and both test timers were cleared. Because power was connected during
 sleep, this validates the sleep path and recovery but is not an isolated proof
 of the scheduled wake source.
 
+## Sleep history, sleep blockers and reliability (Mac 0.5.0 / Companion 1.6)
+
+**Sleep History…** (menu or status window) shows when the Mac was awake, in a
+background (display-off) wake, or asleep, and why: idle, lid, Modafinil timer or
+iPhone request, macOS maintenance, network activity, alarms. Modafinil's own
+actions (keep-awake on/off and their source, timers, wake alarms, sleep results)
+appear alongside. Recording is event-driven: the app reads a few kernel and
+IOPMrootDomain values when macOS reports a wake, writes one small line to
+`~/Library/Application Support/Modafinil/power-history.jsonl` (60-day retention),
+and does no work while the Mac sleeps. Time between a recorded sleep and the next
+wake is shown as asleep; time when Modafinil was not running is shown as no data.
+It never parses `pmset -g log`, which can take a minute of CPU.
+
+The status window lists **other apps affecting sleep** (power assertions such as
+Chrome's video wake lock), read on demand and only refreshed while visible. A
+failed sleep receipt now names the apps holding sleep assertions at that time.
+
+Reliability changes:
+
+- Modafinil opens at login (menu-bar only) so phone control survives restarts;
+  toggle with **Open at Login**.
+- The companion listener restarts itself after failures and after every wake.
+- Every wake, including lid-closed network wakes, is observed through IOKit.
+  macOS maintenance and background-task wakes no longer start the 90-second
+  recovery keep-awake; network, lid, input and alarm wakes still do.
+- The helper wakes once at the timer deadline instead of every second, and the
+  app reacts to a helper notification instead of re-reading the journal every
+  2 seconds. Codex detection no longer spawns `pgrep`.
+- Sleep receipts keep the first wake after sleep instead of the latest one.
+
+Protocol v5 adds the `history` command and signed blocker/history fields. Mac 0.5.0
+still serves v1–v4 phones unchanged; the iPad relay is unchanged.
+
 ## Companion wake recovery (Mac 0.4.1 / Companion 1.5)
 
 Protocol v4 signs the Mac's current private Wi-Fi and hardware wake addresses.

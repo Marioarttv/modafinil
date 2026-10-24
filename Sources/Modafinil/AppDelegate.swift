@@ -1,10 +1,12 @@
 import AppKit
+import notify
 import ModafinilShared
 import ModafinilRemoteProtocol
 import ServiceManagement
 
 final class AppDelegate: NSObject,
     NSApplicationDelegate,
+    NSPopoverDelegate,
     CompanionServerDelegate,
     CompanionSetupWindowControllerDelegate,
     StatusPopoverViewControllerDelegate,
@@ -16,6 +18,18 @@ final class AppDelegate: NSObject,
     private let codexRuntimeMonitor = CodexRuntimeMonitor()
     private let companionConfigurationStore = CompanionConfigurationStore()
     private let statusPopover = NSPopover()
+    private let powerMonitor = PowerEventMonitor()
+    private let historyRecorder = PowerHistoryRecorder()
+    private let loginItems = LoginItemController()
+    private var historyWindowController: SleepHistoryWindowController?
+    private var journalNotifyToken: Int32?
+    private var assertionNotifyToken: Int32?
+    private var isAssertionRefreshScheduled = false
+    private var keepAwakeChangeSource: String?
+    private var companionAccessStatus = "Starting"
+    private var launchedAsLoginItem = false
+    private var lastNotedAttempt: (id: String, phase: SleepAttempt.Phase)? =
+        (try? SleepJournalStore.read())?.attempt.map { ($0.id, $0.phase) }
 
     private var companionServer: CompanionServer?
     private var companionSetupWindowController: CompanionSetupWindowController?
@@ -39,7 +53,6 @@ final class AppDelegate: NSObject,
     private var codexRuntimeTimer: Timer?
     private var isProvisionalWakeLeaseActive = false
     private var provisionalWakeLeaseTimer: Timer?
-    private var sleepStatusTimer: Timer?
     private var sleepAttempt: SleepAttempt?
     private var lastHandledSleepAttemptID = (try? SleepJournalStore.read())?.attempt?.id
     private var sleepHistoryError: String?
@@ -48,6 +61,14 @@ final class AppDelegate: NSObject,
     private var scheduledWakeDate: Date?
     private var isWakeScheduleInFlight = false
     private static let scheduledWakeDefaultsKey = "companion.scheduledWakeAt"
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        if let event = NSAppleEventManager.shared().currentAppleEvent,
+           event.eventID == AEEventID(kAEOpenApplication),
+           event.paramDescriptor(forKeyword: AEKeyword(keyAEPropData))?.enumCodeValue == OSType(keyAELaunchedAsLogInItem) {
+            launchedAsLoginItem = true
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("Modafinil applicationDidFinishLaunching")
@@ -95,21 +116,25 @@ final class AppDelegate: NSObject,
         refreshHelperStatus()
         refreshSleepStatus()
         synchronizeSleepJournal()
-        let statusTimer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            self.synchronizeSleepJournal()
-            self.refreshIcon()
-        }
-        sleepStatusTimer = statusTimer
-        RunLoop.main.add(statusTimer, forMode: .common)
+        registerJournalNotification()
+        powerMonitor.onDidWake = { [weak self] in self?.handleSystemWake() }
+        do { try powerMonitor.start() } catch { lastError = error.localizedDescription }
+        historyRecorder.recordAppStart()
+        loginItems.applyDefaultIfNeeded()
         restoreScheduledWake()
         startCompanionServer()
         refreshIcon()
-        showStatusWindow()
+        if !launchedAsLoginItem {
+            showStatusWindow()
+        }
 
         if companionConfigurationStore.isWakeArmed {
             activateProvisionalWakeLease()
         }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        updateAssertionObservation()
     }
 
     func applicationShouldHandleReopen(
@@ -136,9 +161,12 @@ final class AppDelegate: NSObject,
     func applicationWillTerminate(_ notification: Notification) {
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+        historyRecorder.recordAppStop()
+        powerMonitor.stop()
+        if let journalNotifyToken { notify_cancel(journalNotifyToken) }
+        if let assertionNotifyToken { notify_cancel(assertionNotifyToken) }
         codexRuntimeTimer?.invalidate()
         provisionalWakeLeaseTimer?.invalidate()
-        sleepStatusTimer?.invalidate()
         scheduledWakeTimer?.invalidate()
         statusPopover.performClose(nil)
         statusWindowController?.close()
@@ -162,6 +190,14 @@ final class AppDelegate: NSObject,
             self?.lastError = message
             self?.refreshIcon()
         }
+        server.statusHandler = { [weak self] status in
+            guard let self else { return }
+            self.companionAccessStatus = status
+            if status == "Listening", self.lastError?.hasPrefix("Companion listener") == true {
+                self.lastError = nil
+            }
+            self.refreshIcon()
+        }
 
         do {
             try server.start()
@@ -176,14 +212,48 @@ final class AppDelegate: NSObject,
         companionSetupWindowController?.refresh()
     }
 
+    /// A full (display) wake. NSWorkspace does not report background wakes.
     @objc private func workspaceDidWake() {
+        historyRecorder.recordFullWake()
+        companionServer?.ensureRunning()
         if !completeScheduledWakeIfDue() {
             activateProvisionalWakeLease()
         }
+        refreshHistoryWindow()
+    }
+
+    /// Every system wake, including lid-closed network wakes and macOS maintenance.
+    private func handleSystemWake() {
+        let snapshot = historyRecorder.recordWake()
+        companionServer?.ensureRunning()
+        synchronizeSleepJournal()
+        defer {
+            refreshIcon()
+            refreshHistoryWindow()
+        }
+        if completeScheduledWakeIfDue() { return }
+        // macOS housekeeping wakes happen several times an hour; they must not
+        // keep the Mac awake. Network, lid, input and alarm wakes still do.
+        guard !PowerReason.wakeCause(snapshot?.combinedWakeReason).isHousekeeping else { return }
+        activateProvisionalWakeLease()
+    }
+
+    private func registerJournalNotification() {
+        var token: Int32 = 0
+        let status = notify_register_dispatch(SleepJournalStore.changeNotification, &token, .main) { [weak self] _ in
+            guard let self else { return }
+            self.synchronizeSleepJournal()
+            self.refreshIcon()
+        }
+        if status == UInt32(NOTIFY_STATUS_OK) { journalNotifyToken = token }
     }
 
     private func activateProvisionalWakeLease() {
         guard companionConfigurationStore.isWakeArmed else { return }
+        if !isProvisionalWakeLeaseActive {
+            historyRecorder.note("Wake recovery: keeping the Mac awake for 90 s")
+        }
+        keepAwakeChangeSource = "wake recovery"
 
         // A maintenance/dark wake is not the travelling phone's confirmation.
         // Retain the authorization until Keep Awake or an explicit local change.
@@ -198,6 +268,7 @@ final class AppDelegate: NSObject,
             guard let self else { return }
             self.isProvisionalWakeLeaseActive = false
             self.provisionalWakeLeaseTimer = nil
+            self.keepAwakeChangeSource = "wake recovery ended"
             self.reconcileSleepPreventionWithCurrentMode()
         }
         provisionalWakeLeaseTimer = timer
@@ -234,6 +305,7 @@ final class AppDelegate: NSObject,
         cancelProvisionalWakeLease()
         companionConfigurationStore.isWakeArmed = false
         isSleepPreventionRequested = nextState
+        keepAwakeChangeSource = "Mac"
         refreshHelperStatus()
         reconcileSleepPreventionWithCurrentMode()
     }
@@ -258,6 +330,10 @@ final class AppDelegate: NSObject,
                     self.lastHandledSleepAttemptID = (try? SleepJournalStore.read())?.attempt?.id
                     self.lidMonitor.turnDisplayOffIfNeeded()
                 }
+                if previousState != enabled {
+                    self.historyRecorder.note("Keep-awake \(enabled ? "on" : "off") (\(self.keepAwakeChangeSource ?? "Modafinil"))")
+                }
+                self.keepAwakeChangeSource = nil
             case .failure(let error):
                 self.isSleepPreventionEnabled = previousState
                 self.lidMonitor.setEnabled(previousState)
@@ -284,6 +360,7 @@ final class AppDelegate: NSObject,
         let enabled = shouldEnableSleepPreventionNow
 
         guard isSleepPreventionEnabled != enabled else {
+            keepAwakeChangeSource = nil
             refreshIcon()
             return
         }
@@ -425,10 +502,7 @@ final class AppDelegate: NSObject,
     ) {
         guard companionSetupWindowController === windowController else { return }
         companionSetupWindowController = nil
-
-        if statusWindowController?.window?.isVisible != true {
-            NSApp.setActivationPolicy(.accessory)
-        }
+        updateActivationPolicy()
     }
 
     @objc private func quit() {
@@ -610,15 +684,14 @@ final class AppDelegate: NSObject,
         windowController.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
         windowController.window?.makeKeyAndOrderFront(nil)
+        updateAssertionObservation()
     }
 
     func statusWindowControllerDidClose(_ windowController: StatusWindowController) {
         guard statusWindowController === windowController else { return }
 
         statusWindowController = nil
-        if companionSetupWindowController?.window?.isVisible != true {
-            NSApp.setActivationPolicy(.accessory)
-        }
+        updateActivationPolicy()
     }
 
     @objc private func showStatusPopover() {
@@ -638,9 +711,11 @@ final class AppDelegate: NSObject,
         statusPopoverViewController = viewController
 
         statusPopover.behavior = .transient
+        if statusPopover.delegate == nil { statusPopover.delegate = self }
         statusPopover.animates = true
         statusPopover.contentViewController = viewController
         statusPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        updateAssertionObservation()
     }
 
     private func refreshStatusPopover() {
@@ -662,7 +737,7 @@ final class AppDelegate: NSObject,
     }
 
     func statusPopover(_ viewController: StatusPopoverViewController, didScheduleSleepAfter seconds: Int) {
-        scheduleSleep(argument: String(seconds)) { [weak self] result in
+        scheduleSleep(argument: String(seconds), source: "Mac") { [weak self] result in
             switch result {
             case .success:
                 self?.lastError = nil
@@ -674,7 +749,7 @@ final class AppDelegate: NSObject,
     }
 
     func statusPopoverDidCancelScheduledSleep(_ viewController: StatusPopoverViewController) {
-        cancelScheduledSleep()
+        cancelScheduledSleep(source: "Mac")
     }
 
     func statusPopoverDidOpenCompanionSetup(_ viewController: StatusPopoverViewController) {
@@ -683,6 +758,80 @@ final class AppDelegate: NSObject,
 
     func statusPopoverDidOpenBackgroundSettings(_ viewController: StatusPopoverViewController) {
         openSettings()
+    }
+
+    func statusPopoverDidOpenSleepHistory(_ viewController: StatusPopoverViewController) {
+        showSleepHistory()
+    }
+
+    func statusPopoverDidToggleLoginItem(_ viewController: StatusPopoverViewController) {
+        toggleLoginItem()
+    }
+
+    @objc private func toggleLoginItem() {
+        do {
+            try loginItems.setEnabled(!loginItems.isEnabled)
+        } catch {
+            lastError = "Could not change Open at Login: \(error.localizedDescription)"
+        }
+        refreshIcon()
+    }
+
+    @objc private func showSleepHistory() {
+        statusPopover.performClose(nil)
+        let controller = historyWindowController ?? {
+            let controller = SleepHistoryWindowController()
+            controller.loadTimeline = { [weak self] from, to in
+                self?.historyRecorder.timeline(from: from, to: to) ?? ([], [])
+            }
+            controller.onClose = { [weak self] in
+                self?.historyWindowController = nil
+                self?.updateActivationPolicy()
+            }
+            historyWindowController = controller
+            return controller
+        }()
+        historyRecorder.recordWake()
+        controller.reload()
+        NSApp.setActivationPolicy(.regular)
+        controller.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        controller.window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func refreshHistoryWindow() {
+        guard historyWindowController?.window?.isVisible == true else { return }
+        historyWindowController?.reload()
+    }
+
+    private func updateActivationPolicy() {
+        let anyVisible = statusWindowController?.window?.isVisible == true
+            || companionSetupWindowController?.window?.isVisible == true
+            || historyWindowController?.window?.isVisible == true
+        if !anyVisible { NSApp.setActivationPolicy(.accessory) }
+        updateAssertionObservation()
+    }
+
+    /// Watches other apps' power assertions only while a Modafinil status view is
+    /// visible, refreshing at most once per second.
+    private func updateAssertionObservation() {
+        let visible = statusWindowController?.window?.isVisible == true || statusPopover.isShown
+        if visible, assertionNotifyToken == nil {
+            var token: Int32 = 0
+            let status = notify_register_dispatch("com.apple.system.powermanagement.assertions.anychange", &token, .main) { [weak self] _ in
+                guard let self, !self.isAssertionRefreshScheduled else { return }
+                self.isAssertionRefreshScheduled = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                    self?.isAssertionRefreshScheduled = false
+                    self?.refreshStatusPopover()
+                    self?.refreshStatusWindow()
+                }
+            }
+            if status == UInt32(NOTIFY_STATUS_OK) { assertionNotifyToken = token }
+        } else if !visible, let token = assertionNotifyToken {
+            notify_cancel(token)
+            assertionNotifyToken = nil
+        }
     }
 
     func statusPopoverDidQuit(_ viewController: StatusPopoverViewController) {
@@ -711,22 +860,29 @@ final class AppDelegate: NSObject,
         switch command {
         case .status:
             completion(.success((makeRemoteState(), "Status updated.")))
+        case .history:
+            guard let range = RemoteHistory.parseRange(argument) else {
+                completion(.failure(CompanionRemoteError("The history range is invalid.")))
+                return
+            }
+            let history = historyRecorder.remoteHistory(from: range.from, to: range.to)
+            completion(.success((makeRemoteState(history: history), "History loaded.")))
         case .keepAwake:
             performRemoteKeepAwake(completion: completion)
         case .sleep:
             performRemoteSleep(completion: completion)
         case .scheduleSleep:
-            scheduleSleep(argument: argument, completion: completion)
+            scheduleSleep(argument: argument, source: "iPhone", completion: completion)
         case .cancelScheduledSleep:
-            cancelScheduledSleep(completion: completion)
+            cancelScheduledSleep(source: "iPhone", completion: completion)
         case .scheduleWake:
             guard let timestamp = Int64(argument) else {
                 completion(.failure(CompanionRemoteError("The wake time is invalid.")))
                 return
             }
-            setScheduledWake(Date(timeIntervalSince1970: TimeInterval(timestamp)), completion: completion)
+            setScheduledWake(Date(timeIntervalSince1970: TimeInterval(timestamp)), source: "iPhone", completion: completion)
         case .cancelScheduledWake:
-            setScheduledWake(nil, completion: completion)
+            setScheduledWake(nil, source: "iPhone", completion: completion)
         case .wake:
             completion(.failure(
                 CompanionRemoteError("Wake requests must be sent to the iPhone relay.")
@@ -736,6 +892,7 @@ final class AppDelegate: NSObject,
 
     private func scheduleSleep(
         argument: String,
+        source: String,
         completion: @escaping (Result<(RemoteState, String), Error>) -> Void
     ) {
         guard let seconds = Int64(argument), (60...86_400).contains(seconds) else {
@@ -762,13 +919,14 @@ final class AppDelegate: NSObject,
             switch result {
             case .success:
                 self.companionConfigurationStore.isWakeArmed = true
+                self.historyRecorder.note("Sleep timer set for \(Self.durationText(Double(seconds))) (\(source))")
                 completion(.success((self.makeRemoteState(), "Sleep timer saved on the Mac.")))
             case .failure(let error): completion(.failure(error))
             }
         }
     }
 
-    private func cancelScheduledSleep(completion: ((Result<(RemoteState, String), Error>) -> Void)? = nil) {
+    private func cancelScheduledSleep(source: String, completion: ((Result<(RemoteState, String), Error>) -> Void)? = nil) {
         helperClient.setSleepTimer(after: 0) { [weak self] result in
             guard let self else { return }
             self.synchronizeSleepJournal()
@@ -776,6 +934,7 @@ final class AppDelegate: NSObject,
             switch result {
             case .success:
                 self.companionConfigurationStore.isWakeArmed = false
+                self.historyRecorder.note("Sleep timer cancelled (\(source))")
                 completion?(.success((self.makeRemoteState(), "The sleep timer is off.")))
             case .failure(let error):
                 self.lastError = error.localizedDescription
@@ -791,6 +950,7 @@ final class AppDelegate: NSObject,
             sleepHistoryError = nil
             scheduledSleepDate = journal.schedule?.date
             sleepAttempt = journal.attempt
+            if let attempt = sleepAttempt { noteSleepAttemptIfChanged(attempt) }
             if let attempt = sleepAttempt {
                 if !isToggleInFlight && (attempt.phase == .pending || (attempt.id != lastHandledSleepAttemptID && attempt.phase != .cancelled)) {
                     // The helper's timer is authoritative even while this UI is suspended.
@@ -809,6 +969,29 @@ final class AppDelegate: NSObject,
         }
     }
 
+    private func noteSleepAttemptIfChanged(_ attempt: SleepAttempt) {
+        let previous = lastNotedAttempt
+        guard previous?.id != attempt.id || previous?.phase != attempt.phase else { return }
+        lastNotedAttempt = (attempt.id, attempt.phase)
+        if previous?.id != attempt.id, attempt.attempts > 0 || attempt.phase == .pending {
+            let source = attempt.trigger == "timer" ? "sleep timer" : (attempt.trigger == "request" ? "iPhone" : "Modafinil")
+            historyRecorder.note("Sleep requested (\(source))", at: attempt.requestedAt)
+        }
+        switch attempt.phase {
+        case .pending: break
+        case .confirmed: historyRecorder.note("Sleep confirmed by macOS", at: attempt.sleptAt ?? Date())
+        case .failed: historyRecorder.note("Sleep not confirmed: \(attempt.detail)")
+        case .cancelled: historyRecorder.note("Sleep request cancelled")
+        }
+    }
+
+    static func durationText(_ seconds: Double) -> String {
+        let minutes = Int((seconds / 60).rounded())
+        if minutes < 60 { return "\(minutes) min" }
+        let hours = minutes / 60, rest = minutes % 60
+        return rest == 0 ? "\(hours) h" : "\(hours) h \(rest) min"
+    }
+
     private var sleepAttemptDescription: String {
         if let sleepHistoryError { return sleepHistoryError }
         guard let attempt = sleepAttempt else { return "No sleep request recorded yet." }
@@ -819,6 +1002,7 @@ final class AppDelegate: NSObject,
     }
 
     private func performRemoteKeepAwake(
+        source: String = "iPhone",
         completion: @escaping (Result<(RemoteState, String), Error>) -> Void
     ) {
         guard !isToggleInFlight else {
@@ -856,6 +1040,7 @@ final class AppDelegate: NSObject,
         }
 
         lastError = nil
+        keepAwakeChangeSource = source
         setSleepPreventionEnabled(true) { [weak self] result in
             guard let self else { return }
 
@@ -941,7 +1126,7 @@ final class AppDelegate: NSObject,
         }
     }
 
-    private func makeRemoteState() -> RemoteState {
+    private func makeRemoteState(history: RemoteHistory? = nil) -> RemoteState {
         let wakeTargets = CompanionNetworkInformation.discover()
             .wakeTargetMACs(configured: companionConfigurationStore.configuredTargetMACs)
         synchronizeSleepJournal()
@@ -958,12 +1143,18 @@ final class AppDelegate: NSObject,
                     sleptAt: $0.sleptAt.map { Int64($0.timeIntervalSince1970) },
                     wokeAt: $0.wokeAt.map { Int64($0.timeIntervalSince1970) }, detail: $0.detail)
             },
-            wakeTargetMACs: wakeTargets
+            wakeTargetMACs: wakeTargets,
+            blockers: SleepBlockers.current().prefix(12).map {
+                RemoteSleepBlocker(effect: $0.effect.rawValue, name: String($0.processName.prefix(40)),
+                                   detail: $0.details.first.map { String($0.prefix(60)) })
+            },
+            history: history
         )
     }
 
     private func setScheduledWake(
         _ date: Date?,
+        source: String,
         completion: @escaping (Result<(RemoteState, String), Error>) -> Void
     ) {
         guard !isWakeScheduleInFlight else {
@@ -990,6 +1181,9 @@ final class AppDelegate: NSObject,
             self.refreshIcon()
             switch result {
             case .success:
+                self.historyRecorder.note(date.map {
+                    "Wake alarm set for \($0.formatted(date: .abbreviated, time: .shortened)) (\(source))"
+                } ?? "Wake alarm cancelled (\(source))")
                 completion(.success((self.makeRemoteState(), date == nil
                     ? "The wake timer is off."
                     : "Wake scheduled on the Mac. Keep Modafinil open to stay awake afterward.")))
@@ -1047,7 +1241,8 @@ final class AppDelegate: NSObject,
         refreshIcon()
         // A wake alarm missed hours ago must not unexpectedly change the mode.
         guard overdue <= 300 else { return false }
-        performRemoteKeepAwake { [weak self] result in
+        historyRecorder.note("Wake alarm fired")
+        performRemoteKeepAwake(source: "wake alarm") { [weak self] result in
             if case .failure(let error) = result {
                 self?.lastError = "Scheduled wake keep-awake failed: \(error.localizedDescription)"
                 self?.refreshIcon()
@@ -1057,14 +1252,14 @@ final class AppDelegate: NSObject,
     }
 
     func statusPopover(_ viewController: StatusPopoverViewController, didScheduleWakeAt date: Date) {
-        setScheduledWake(date) { [weak self] result in
+        setScheduledWake(date, source: "Mac") { [weak self] result in
             if case .failure(let error) = result { self?.lastError = error.localizedDescription }
             self?.refreshIcon()
         }
     }
 
     func statusPopoverDidCancelScheduledWake(_ viewController: StatusPopoverViewController) {
-        setScheduledWake(nil) { [weak self] result in
+        setScheduledWake(nil, source: "Mac") { [weak self] result in
             if case .failure(let error) = result { self?.lastError = error.localizedDescription }
             self?.refreshIcon()
         }
@@ -1093,6 +1288,7 @@ final class AppDelegate: NSObject,
         }
 
         if wasCodexRunning != isCodexRunning {
+            keepAwakeChangeSource = isCodexRunning ? "Codex started" : "Codex stopped"
             reconcileSleepPreventionWithCurrentMode()
         } else {
             refreshIcon()
@@ -1249,6 +1445,15 @@ final class AppDelegate: NSObject,
         codexLimitItem.state = isCodexRuntimeLimitEnabled ? .on : .off
         menu.addItem(codexLimitItem)
 
+        let loginItem = NSMenuItem(title: "Open at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
+        loginItem.target = self
+        loginItem.state = loginItems.isEnabled ? .on : .off
+        menu.addItem(loginItem)
+
+        let historyItem = NSMenuItem(title: "Sleep History…", action: #selector(showSleepHistory), keyEquivalent: "")
+        historyItem.target = self
+        menu.addItem(historyItem)
+
         let companionSetupItem = NSMenuItem(
             title: "Companion Setup…",
             action: #selector(showCompanionSetup),
@@ -1315,7 +1520,11 @@ final class AppDelegate: NSObject,
             canScheduleSleep: helperStatus == .enabled && !isToggleInFlight && !isQuitInProgress,
             scheduledWakeDate: scheduledWakeDate,
             canScheduleWake: helperStatus == .enabled && !isWakeScheduleInFlight && !isQuitInProgress,
-            lastError: lastError
+            lastError: lastError,
+            loginItemStatus: loginItems.statusDescription,
+            isLoginItemEnabled: loginItems.isEnabled,
+            companionStatus: companionAccessStatus,
+            blockers: SleepBlockers.current()
         )
     }
 
