@@ -19,6 +19,25 @@ final class PowerHistoryTests: XCTestCase {
         XCTAssertFalse(PowerReason.WakeCause.unknown.isHousekeeping, "Unknown wakes must still allow remote recovery")
     }
 
+    func testRecoveryKeepAwakeIsBoundedOnBackgroundWakes() {
+        func lease(_ graphics: Bool?, _ cause: PowerReason.WakeCause, sleep: Double? = 3_600, last: Double? = nil) -> Bool {
+            WakeRecoveryPolicy.shouldStartLease(hasGraphics: graphics, cause: cause,
+                                                sinceSleepRequest: sleep, sinceLastBackgroundLease: last)
+        }
+        XCTAssertTrue(lease(false, .network), "A relay wake hours after sleep starts recovery")
+        XCTAssertFalse(lease(false, .network, sleep: 20), "Not the network blip right after Modafinil sleeps")
+        XCTAssertFalse(lease(false, .network, last: 300), "At most once per 10 minutes in background")
+        XCTAssertTrue(lease(false, .network, last: 700))
+        XCTAssertFalse(lease(false, .maintenance))
+        XCTAssertFalse(lease(false, .backgroundTask))
+        XCTAssertFalse(lease(false, .unknown))
+        XCTAssertFalse(lease(false, .alarm))
+        XCTAssertFalse(lease(nil, .unknown), "Missing capabilities count as a background wake")
+        XCTAssertTrue(lease(true, .lid), "Opening the lid behaves as before")
+        XCTAssertTrue(lease(true, .network, sleep: 5, last: 10), "Full wakes are not rate-limited")
+        XCTAssertFalse(lease(true, .maintenance))
+    }
+
     func testSleepReasonsClassify() {
         XCTAssertEqual(PowerReason.sleepCause("Idle Sleep", pid: 100), .idle)
         XCTAssertEqual(PowerReason.sleepCause("Clamshell Sleep", pid: nil), .lidClosed)
@@ -59,7 +78,9 @@ final class PowerHistoryTests: XCTestCase {
             PowerEvent(kind: .fullWake, at: 2_003),
         ]
         let timeline = PowerTimeline.build(events: events, from: 0, to: 3_000)
-        XCTAssertEqual(timeline.segments.map(\.state), [.awake, .asleep, .background, .asleep, .background, .awake])
+        XCTAssertEqual(timeline.segments.map(\.state), [.awake, .asleep, .background, .asleep, .awake])
+        XCTAssertEqual(timeline.segments.last?.start, 2_000, "A user wake counts as awake from the wake itself")
+        XCTAssertEqual(timeline.segments.last?.reason, "Lid opened")
         XCTAssertEqual(timeline.segments[1].reason, "Modafinil (sleep timer)")
         XCTAssertEqual(timeline.segments[1].duration, 898)
         XCTAssertEqual(timeline.segments[2].wakeCause, .maintenance)
@@ -69,7 +90,7 @@ final class PowerHistoryTests: XCTestCase {
 
         let summary = PowerTimeline.summarize(timeline.segments)
         XCTAssertEqual(summary.asleep, 898 + 955)
-        XCTAssertEqual(summary.backgroundWakes, 2)
+        XCTAssertEqual(summary.backgroundWakes, 1)
         XCTAssertEqual(summary.wakeCauses[.maintenance], 1)
         XCTAssertEqual(summary.wakeCauses[.lid], 1)
     }
@@ -157,6 +178,41 @@ final class PowerHistoryTests: XCTestCase {
         XCTAssertEqual(f.engine.timerMode, .idle)
     }
 
+    func testSleepConfirmedBeforeCPUStopsRecordsTheFirstWakeLater() throws {
+        let f = SleepCoordinatorTests.Fixture()
+        try f.engine.begin(trigger: "timer")
+        f.advance(2)
+        f.times.slept = 1_003 // kernel recorded sleep, CPU not yet stopped: woke (950) < slept
+        f.advance(1)
+        XCTAssertEqual(f.engine.journal.attempt?.phase, .confirmed)
+        XCTAssertNil(f.engine.journal.attempt?.wokeAt)
+        XCTAssertEqual(f.engine.timerMode, .verifying, "Keeps one more check for the first wake")
+        f.times.woke = 5_000
+        f.advance(1)
+        XCTAssertEqual(f.engine.journal.attempt?.wokeAt, Date(timeIntervalSince1970: 5_000))
+        XCTAssertEqual(f.engine.timerMode, .idle)
+    }
+
+    func testLaterSleepMakesFirstWakeUnknownInsteadOfWrong() throws {
+        let f = SleepCoordinatorTests.Fixture()
+        try f.engine.begin(trigger: "timer")
+        f.advance(2)
+        f.times.slept = 1_003
+        f.advance(1)
+        f.times.slept = 9_000; f.times.woke = 9_500 // a second sleep/wake pair happened
+        f.advance(1)
+        XCTAssertNil(f.engine.journal.attempt?.wokeAt)
+        XCTAssertEqual(f.engine.timerMode, .idle)
+    }
+
+    func testTimerDeadlineIgnoresClockSetBackwards() throws {
+        let f = SleepCoordinatorTests.Fixture()
+        try f.engine.schedule(after: 600) // date 1_600, continuous deadline 700
+        f.date = Date(timeIntervalSince1970: 400) // clock set back 600 s
+        let deadline = f.engine.timerDeadline(now: f.date, continuousNow: f.clock)
+        XCTAssertEqual(deadline, Date(timeIntervalSince1970: 1_000), "Fires after 600 s of real time")
+    }
+
     // MARK: Protocol v5
 
     private let secret = Data(repeating: 7, count: 32)
@@ -225,6 +281,30 @@ final class PowerHistoryTests: XCTestCase {
         let line = try RemoteWireCodec.encodeLine(response)
         XCTAssertLessThan(line.count, RemoteWireCodec.maximumMessageSize)
         XCTAssertEqual(try RemoteWireCodec.decodeLine(RemoteResponse.self, from: line), response)
+
+        // Consecutive pages tile the range without gaps.
+        var covered: [RemoteHistorySegment] = []
+        var to: Int64 = 560_000
+        var pages = 0
+        while pages < 40 {
+            let inRange = segments.compactMap { segment -> RemoteHistorySegment? in
+                guard segment.start < to else { return nil }
+                return .init(start: segment.start, end: min(segment.end, to), kind: segment.kind,
+                             reason: segment.reason, cause: segment.cause)
+            }
+            let next = RemoteHistory.page(from: 0, to: to, segments: inRange, markers: markers.filter { $0.at <= to })
+            covered += next.segments
+            pages += 1
+            if next.complete { break }
+            XCTAssertEqual(next.segments.last?.start, next.oldest)
+            XCTAssertTrue(next.markers.allSatisfy { $0.at >= next.oldest })
+            to = next.oldest
+        }
+        let ordered = covered.sorted { $0.start < $1.start }
+        XCTAssertEqual(ordered.first?.start, 0)
+        for (earlier, later) in zip(ordered, ordered.dropFirst()) {
+            XCTAssertEqual(earlier.end, later.start, "No gap or overlap between pages")
+        }
 
         let small = RemoteHistory.page(from: 0, to: 10, segments: [segments[0]], markers: [])
         XCTAssertTrue(small.complete)

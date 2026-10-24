@@ -18,6 +18,8 @@ public struct SleepAttempt: Codable, Equatable {
     public var detail: String
     /// "timer" or "request"; nil in journals written before 0.5.0.
     public var trigger: String? = nil
+    /// True once the first wake after `sleptAt` was recorded or became unknowable.
+    public var wakeResolved: Bool? = nil
 }
 
 public struct SleepSchedule: Codable, Equatable {
@@ -110,9 +112,24 @@ public final class SleepCoordinator {
     /// second only during the short sleep-verification window.
     public enum TimerMode: Equatable { case idle, deadline(Date), verifying }
     public var timerMode: TimerMode {
-        if journal.attempt?.phase == .pending { return .verifying }
+        if journal.attempt?.phase == .pending || isAwaitingFirstWake { return .verifying }
         if let schedule = journal.schedule { return .deadline(schedule.date) }
         return .idle
+    }
+
+    /// Sleep confirmed before macOS actually stopped the CPU: the next tick runs at
+    /// the first wake. Journals from before 0.5.0 (no trigger) never tick for this.
+    private var isAwaitingFirstWake: Bool {
+        guard let attempt = journal.attempt else { return false }
+        return attempt.phase == .confirmed && attempt.wokeAt == nil && attempt.sleptAt != nil
+            && attempt.wakeResolved != true && attempt.trigger != nil
+    }
+
+    /// Wall-clock deadline for the timer: the earlier of its date and its
+    /// continuous-time deadline, so a clock set backwards cannot delay it.
+    public func timerDeadline(now: Date, continuousNow: TimeInterval) -> Date? {
+        guard let schedule = journal.schedule else { return nil }
+        return min(schedule.date, now.addingTimeInterval(max(0, schedule.continuousDeadline - continuousNow)))
     }
 
     public init(journal: SleepJournal = .init(), now: @escaping () -> Date = Date.init,
@@ -214,7 +231,7 @@ public final class SleepCoordinator {
                         phase: .confirmed, sleptAt: Date(timeIntervalSince1970: times.slept),
                         wokeAt: Date(timeIntervalSince1970: times.woke),
                         detail: "The Mac was already asleep when the timer elapsed; it has since woken.",
-                        trigger: "timer")
+                        trigger: "timer", wakeResolved: true)
                     try persist()
                 } else if time - schedule.continuousDeadline > 60 || now().timeIntervalSince(schedule.date) > 60 {
                     journal.schedule = nil
@@ -225,7 +242,6 @@ public final class SleepCoordinator {
                 } else { try begin(trigger: "timer") }
             }
             guard var attempt = journal.attempt else { return }
-            let wasPending = attempt.phase == .pending
             if attempt.phase == .pending {
                 if times.slept > attempt.baselineSleep {
                     attempt.phase = .confirmed
@@ -247,12 +263,19 @@ public final class SleepCoordinator {
                     return
                 }
             }
-            // Ticks never run while asleep, so the first tick after confirmation sees the
-            // first wake. Later ticks or helper restarts must not overwrite it.
-            if wasPending, attempt.wokeAt == nil, let sleptAt = attempt.sleptAt,
-               times.woke >= sleptAt.timeIntervalSince1970 {
-                attempt.wokeAt = Date(timeIntervalSince1970: times.woke)
-                attempt.detail = "Sleep was confirmed; macOS subsequently woke (background or full wake)."
+            // kern.waketime is the first wake after a sleep only while kern.sleeptime
+            // still names that sleep. Record it once; never overwrite it later.
+            if attempt.phase == .confirmed, attempt.wokeAt == nil, attempt.wakeResolved != true,
+               let sleptAt = attempt.sleptAt {
+                if abs(times.slept - sleptAt.timeIntervalSince1970) < 0.5 {
+                    if times.woke >= times.slept {
+                        attempt.wokeAt = Date(timeIntervalSince1970: times.woke)
+                        attempt.wakeResolved = true
+                        attempt.detail = "Sleep was confirmed; macOS subsequently woke (background or full wake)."
+                    }
+                } else {
+                    attempt.wakeResolved = true // A later sleep replaced the evidence.
+                }
             }
             if journal.attempt != attempt { journal.attempt = attempt; try persist() }
         } catch {

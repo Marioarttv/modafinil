@@ -62,28 +62,26 @@ public struct RemoteHistory: Codable, Equatable, Sendable {
 
     /// Builds one newest-first page whose JSON stays within `budget` bytes, so a
     /// signed response always fits in `RemoteWireCodec.maximumMessageSize`.
+    /// Pages are cut only at segment starts, so consecutive pages never leave gaps.
     public static func page(from: Int64, to: Int64, segments: [RemoteHistorySegment],
                             markers: [RemoteHistoryMarker], budget: Int = 11_000) -> RemoteHistory {
-        enum Item { case segment(RemoteHistorySegment), marker(RemoteHistoryMarker) }
-        var items: [(time: Int64, item: Item)] = segments.map { ($0.start, .segment($0)) }
-        items += markers.map { ($0.at, .marker($0)) }
-        items.sort { $0.time > $1.time }
+        let sortedSegments = segments.sorted { $0.start > $1.start }
+        let sortedMarkers = markers.sorted { $0.at > $1.at }
         func build(_ count: Int) -> RemoteHistory {
-            let included = items.prefix(count)
-            var pageSegments: [RemoteHistorySegment] = []
-            var pageMarkers: [RemoteHistoryMarker] = []
-            for entry in included {
-                switch entry.item {
-                case .segment(let segment): pageSegments.append(segment)
-                case .marker(let marker): pageMarkers.append(marker)
-                }
+            guard count < sortedSegments.count else {
+                return RemoteHistory(from: from, to: to, segments: sortedSegments,
+                                     markers: sortedMarkers, complete: true, oldest: from)
             }
-            let complete = count >= items.count
-            return RemoteHistory(from: from, to: to, segments: pageSegments, markers: pageMarkers,
-                                 complete: complete, oldest: complete ? from : (included.last?.time ?? from))
+            var included = Array(sortedSegments.prefix(max(1, count)))
+            let oldest = included.last!.start
+            // Keep every segment that starts in the same second as the cut.
+            included += sortedSegments.dropFirst(included.count).prefix { $0.start == oldest }
+            return RemoteHistory(from: from, to: to, segments: included,
+                                 markers: sortedMarkers.filter { $0.at >= oldest },
+                                 complete: false, oldest: oldest)
         }
         let encoder = JSONEncoder()
-        var count = items.count
+        var count = sortedSegments.count
         var result = build(count)
         while count > 1, ((try? encoder.encode(result))?.count ?? .max) > budget {
             count = max(1, count * 3 / 4)

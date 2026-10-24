@@ -116,7 +116,7 @@ public enum PowerReason {
         guard let text = reason?.lowercased(), !text.isEmpty else { return .unknown }
         if text.contains("rtc/maintenance") || text.hasSuffix("/maintenance") { return .maintenance }
         if text.contains("sleepservice") { return .backgroundTask }
-        if text.contains(" lid") || text.hasPrefix("lid") { return .lid }
+        if text.contains(" lid") || text.hasPrefix("lid") || text.contains("lidopen") { return .lid }
         if text.contains("hid") || text.contains("keyboard") || text.contains("trackpad")
             || text.contains("pwrbtn") || text.contains("power button") || text.contains("useractivity") { return .userInput }
         if text.contains("e_rx_ip_packet") || text.contains("wifibt") || text.contains("wlan")
@@ -251,7 +251,11 @@ public enum PowerTimeline {
                 let state: PowerSegment.State = event.dark == false ? .awake : .background
                 open(state, at: event.at, reason: cause == .unknown ? (event.reason ?? cause.title) : cause.title, cause: cause)
             case .fullWake:
-                if current?.state == .background || current?.state == .asleep || current == nil {
+                // A user wake starts dark for a few seconds; count it as awake throughout.
+                if var segment = current, segment.state == .background, event.at - segment.start <= 30 {
+                    segment.state = .awake
+                    current = segment
+                } else if current?.state == .background || current?.state == .asleep || current == nil {
                     let cause = current?.wakeCause
                     open(.awake, at: event.at, reason: cause.map { "Woke: \($0.title)" } ?? "Display on", cause: cause)
                 }
@@ -392,5 +396,27 @@ public struct PowerRecorderState: Equatable {
             lastWake = snapshot.woke
         }
         return result
+    }
+}
+
+/// Decides whether a system wake should start the 90-second recovery keep-awake.
+public enum WakeRecoveryPolicy {
+    public static let quietPeriodAfterSleepRequest: TimeInterval = 120
+    public static let minimumBackgroundInterval: TimeInterval = 600
+
+    /// - Parameters:
+    ///   - hasGraphics: the display side woke (full wake). nil is treated as background.
+    ///   - sinceSleepRequest: seconds since Modafinil last requested sleep.
+    ///   - sinceLastBackgroundLease: seconds since a background wake last started one.
+    public static func shouldStartLease(hasGraphics: Bool?, cause: PowerReason.WakeCause,
+                                        sinceSleepRequest: TimeInterval?,
+                                        sinceLastBackgroundLease: TimeInterval?) -> Bool {
+        if hasGraphics == true { return !cause.isHousekeeping }
+        // Background wakes happen many times a night. Only a network wake can be the
+        // iPhone's wake request, and it must not repeat into a night of keep-awake.
+        guard cause == .network else { return false }
+        if let since = sinceSleepRequest, since < quietPeriodAfterSleepRequest { return false }
+        if let since = sinceLastBackgroundLease, since < minimumBackgroundInterval { return false }
+        return true
     }
 }

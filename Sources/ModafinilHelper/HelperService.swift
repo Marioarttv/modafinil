@@ -33,6 +33,15 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         super.init()
         listener.delegate = self
         performStartupCleanup()
+        // A wall-clock timer would fire late after the clock is set back; re-arm it.
+        NotificationCenter.default.addObserver(forName: .NSSystemClockDidChange, object: nil, queue: nil) { [weak self] _ in
+            guard let self else { return }
+            self.stateQueue.async {
+                self.sleepTickTimer?.cancel()
+                self.sleepTickTimer = nil
+                self.updateSleepTickTimer()
+            }
+        }
     }
 
     func run() {
@@ -150,8 +159,10 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         case .verifying:
             timer = DispatchSource.makeTimerSource(queue: stateQueue)
             timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
-        case .deadline(let date):
+        case .deadline(let scheduledDate):
             timer = DispatchSource.makeTimerSource(queue: stateQueue)
+            let date = sleepCoordinator.timerDeadline(now: Date(), continuousNow: SystemSleepTimes.continuousTime)
+                ?? scheduledDate
             let seconds = date.timeIntervalSince1970
             let wall = DispatchWallTime(timespec: timespec(
                 tv_sec: Int(seconds.rounded(.down)),

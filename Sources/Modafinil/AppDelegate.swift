@@ -28,6 +28,7 @@ final class AppDelegate: NSObject,
     private var keepAwakeChangeSource: String?
     private var companionAccessStatus = "Starting"
     private var launchedAsLoginItem = false
+    private var lastBackgroundLeaseAt: Date?
     private var lastNotedAttempt: (id: String, phase: SleepAttempt.Phase)? =
         (try? SleepJournalStore.read())?.attempt.map { ($0.id, $0.phase) }
 
@@ -232,9 +233,15 @@ final class AppDelegate: NSObject,
             refreshHistoryWindow()
         }
         if completeScheduledWakeIfDue() { return }
-        // macOS housekeeping wakes happen several times an hour; they must not
-        // keep the Mac awake. Network, lid, input and alarm wakes still do.
-        guard !PowerReason.wakeCause(snapshot?.combinedWakeReason).isHousekeeping else { return }
+        guard companionConfigurationStore.isWakeArmed else { return }
+        let now = Date()
+        guard WakeRecoveryPolicy.shouldStartLease(
+            hasGraphics: snapshot?.hasGraphics,
+            cause: PowerReason.wakeCause(snapshot?.combinedWakeReason),
+            sinceSleepRequest: sleepAttempt.map { now.timeIntervalSince($0.requestedAt) },
+            sinceLastBackgroundLease: lastBackgroundLeaseAt.map { now.timeIntervalSince($0) }
+        ) else { return }
+        if snapshot?.hasGraphics != true { lastBackgroundLeaseAt = now }
         activateProvisionalWakeLease()
     }
 
@@ -1144,7 +1151,8 @@ final class AppDelegate: NSObject,
                     wokeAt: $0.wokeAt.map { Int64($0.timeIntervalSince1970) }, detail: $0.detail)
             },
             wakeTargetMACs: wakeTargets,
-            blockers: SleepBlockers.current().prefix(12).map {
+            // History pages carry no blockers, keeping them well inside the size limit.
+            blockers: history != nil ? nil : SleepBlockers.current().prefix(12).map {
                 RemoteSleepBlocker(effect: $0.effect.rawValue, name: String($0.processName.prefix(40)),
                                    detail: $0.details.first.map { String($0.prefix(60)) })
             },
