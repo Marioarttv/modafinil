@@ -46,6 +46,12 @@ struct AppSnapshot {
     var t3Threads: [T3ThreadRow] = []
     var t3SleepAt: Date?
     var isT3RestorePending = false
+    var isQuitBlockersEnabled = false
+    /// Apps that would be asked to quit right now.
+    var quitCandidates: [String] = []
+    var quitExclusions: [AppChoice] = []
+    /// Running apps that can be added to the exclusions.
+    var excludableApps: [AppChoice] = []
     var helperStatus = ""
     var isHelperEnabled = false
     var scheduledSleepDate: Date?
@@ -65,6 +71,11 @@ struct AppSnapshot {
     var version = ""
 }
 
+struct AppChoice: Hashable {
+    var bundleID: String
+    var name: String
+}
+
 struct T3ThreadRow: Hashable {
     var title: String
     var isWaiting: Bool
@@ -75,6 +86,8 @@ protocol AppUIActions: AnyObject {
     func uiToggleKeepAwake()
     func uiToggleCodexLimit()
     func uiToggleT3Sleep()
+    func uiToggleQuitBlockers()
+    func uiSetQuitExclusion(bundleID: String, name: String, excluded: Bool)
     func uiToggleLoginItem()
     func uiScheduleSleep(after seconds: Int)
     func uiCancelSleepTimer()

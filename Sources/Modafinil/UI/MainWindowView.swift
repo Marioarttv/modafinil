@@ -104,7 +104,7 @@ struct OverviewPage: View {
 
             T3SleepCard(snapshot: snapshot) { model.actions?.uiToggleT3Sleep() }
 
-            BlockersCard(blockers: snapshot.blockers)
+            BlockersCard(blockers: snapshot.blockers, quitsBeforeSleep: snapshot.isQuitBlockersEnabled)
         }
     }
 }
@@ -206,6 +206,7 @@ private struct HeroCard: View {
 
 struct BlockersCard: View {
     let blockers: [SleepBlocker]
+    var quitsBeforeSleep = false
 
     var body: some View {
         Card(title: "Other apps affecting sleep", symbol: "cup.and.saucer.fill") {
@@ -246,6 +247,11 @@ struct BlockersCard: View {
             Text("Apps can stop idle sleep while the lid is open. Closing the lid still sleeps the Mac unless Modafinil is on or an external display is connected.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if quitsBeforeSleep {
+                Text("Modafinil asks these apps to quit before it puts the Mac to sleep (except protected and excluded apps).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }
@@ -328,6 +334,10 @@ struct TimersPage: View {
             }
             Text("The helper keeps the timer even if this window closes. Quitting Modafinil cancels it.")
                 .font(.caption).foregroundStyle(.secondary)
+            if snapshot.isQuitBlockersEnabled {
+                Text("1 minute before the timer ends, apps keeping the Mac awake are asked to quit.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -485,6 +495,36 @@ struct SettingsPage: View {
                         + Text("Sleeps 1 minute after no thread is working or waiting. Keep-awake turns back on when you open the lid.")
                 }
                 .accessibilityIdentifier("t3SleepToggle")
+            }
+            Section("Before sleeping") {
+                Toggle(isOn: Binding(
+                    get: { snapshot.isQuitBlockersEnabled },
+                    set: { _ in model.actions?.uiToggleQuitBlockers() })) {
+                    Text("Quit apps that keep the Mac awake")
+                    Text("When Modafinil puts the Mac to sleep (sleep timer, iPhone, or T3 Code finishing), it asks these apps to quit, like ⌘Q, so they can still ask to save. For a sleep timer this happens 1 minute before.")
+                }
+                .accessibilityIdentifier("quitBlockersToggle")
+                LabeledContent("Would quit now",
+                               value: snapshot.quitCandidates.isEmpty ? "None" : snapshot.quitCandidates.joined(separator: ", "))
+                LabeledContent("Never quit", value: SleepBlockerApps.protectedSummary)
+                ForEach(snapshot.quitExclusions, id: \.self) { app in
+                    HStack {
+                        Text(app.name)
+                        Spacer()
+                        Button("Remove") {
+                            model.actions?.uiSetQuitExclusion(bundleID: app.bundleID, name: app.name, excluded: false)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+                Menu("Never Quit Another App…") {
+                    ForEach(snapshot.excludableApps, id: \.self) { app in
+                        Button(app.name) {
+                            model.actions?.uiSetQuitExclusion(bundleID: app.bundleID, name: app.name, excluded: true)
+                        }
+                    }
+                }
+                .disabled(snapshot.excludableApps.isEmpty)
             }
             Section("Privileged helper") {
                 LabeledContent("Status", value: snapshot.helperStatus)
