@@ -24,6 +24,8 @@ final class LidMonitor {
     private var notificationPort: IONotificationPortRef?
     private var notifier: io_object_t = IO_OBJECT_NULL
     private var isEnabled = false
+    /// Called on the main run loop when the lid opens (`false`) or closes (`true`).
+    var onLidStateChange: ((Bool) -> Void)?
 
     deinit {
         stop()
@@ -121,12 +123,13 @@ final class LidMonitor {
 
         let bits = UInt(bitPattern: messageArgument)
         let isClosed = (bits & UInt(kClamshellStateBit)) != 0
+        onLidStateChange?(isClosed)
 
         guard isEnabled, isClosed, !Self.hasExternalDisplay() else { return }
         turnDisplayOff()
     }
 
-    private static func hasExternalDisplay() -> Bool {
+    static func hasExternalDisplay() -> Bool {
         var displayCount: UInt32 = 0
         guard CGGetActiveDisplayList(0, nil, &displayCount) == .success, displayCount > 0 else {
             return false

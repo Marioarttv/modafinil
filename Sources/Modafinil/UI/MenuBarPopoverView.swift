@@ -65,6 +65,17 @@ struct MenuBarPopoverView: View {
                 row("iPhone", symbol: "iphone", tint: .blue) {
                     Text(snapshot.companionStatus).foregroundStyle(.secondary)
                 }
+                if snapshot.isT3SleepEnabled {
+                    row("T3 Code", symbol: "moon.stars.fill", tint: .indigo) {
+                        if let sleepAt = snapshot.t3SleepAt, sleepAt > now {
+                            Text("Sleeping in")
+                            Text(timerInterval: now...sleepAt, countsDown: true).monospacedDigit()
+                        } else {
+                            Text(Self.t3Short(snapshot)).foregroundStyle(.secondary)
+                        }
+                    }
+                    .help(snapshot.t3Status ?? "")
+                }
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -94,6 +105,19 @@ struct MenuBarPopoverView: View {
         }
         .padding(16)
         .frame(width: 340)
+    }
+
+    private static func t3Short(_ snapshot: AppSnapshot) -> String {
+        let waiting = snapshot.t3Threads.filter(\.isWaiting).count
+        let working = snapshot.t3Threads.count - waiting
+        if working + waiting > 0 {
+            return [working > 0 ? "\(working) working" : nil, waiting > 0 ? "\(waiting) waiting" : nil]
+                .compactMap { $0 }.joined(separator: ", ")
+        }
+        guard let status = snapshot.t3Status else { return "" }
+        if status.hasPrefix("Cannot") { return "Unreadable" }
+        if status.contains("not running") { return "Not running" }
+        return "Finished"
     }
 
     private func row<Trailing: View>(_ title: String, symbol: String, tint: Color,

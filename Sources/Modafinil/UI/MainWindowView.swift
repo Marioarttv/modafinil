@@ -102,7 +102,50 @@ struct OverviewPage: View {
                 }
             }
 
+            if snapshot.isT3SleepEnabled {
+                T3SleepCard(snapshot: snapshot)
+            }
+
             BlockersCard(blockers: snapshot.blockers)
+        }
+    }
+}
+
+struct T3SleepCard: View {
+    let snapshot: AppSnapshot
+
+    var body: some View {
+        Card(title: "Sleep when T3 Code finishes", symbol: "moon.stars.fill") {
+            if let sleepAt = snapshot.t3SleepAt, sleepAt > Date() {
+                HStack(spacing: 6) {
+                    Text("T3 Code has finished. Sleeping in")
+                    Text(timerInterval: Date()...sleepAt, countsDown: true).monospacedDigit()
+                }
+                .font(.headline)
+                .foregroundStyle(.indigo)
+            } else if let status = snapshot.t3Status {
+                Text(status).font(.headline)
+            }
+            ForEach(Array(snapshot.t3Threads.prefix(6).enumerated()), id: \.offset) { _, thread in
+                HStack {
+                    Text(thread.title).lineLimit(1)
+                    Spacer()
+                    Pill(text: thread.isWaiting ? "Waiting" : "Working",
+                         color: thread.isWaiting ? .orange : .green)
+                }
+                .font(.callout)
+            }
+            if snapshot.t3Threads.count > 6 {
+                Text("and \(snapshot.t3Threads.count - 6) more").font(.caption).foregroundStyle(.secondary)
+            }
+            Text(snapshot.isKeepAwakeRequested
+                 ? "With the lid closed and no external display, the Mac sleeps 1 minute after the last T3 thread stops working or waiting. Keep-awake turns back on when you open the lid."
+                 : snapshot.isT3RestorePending
+                 ? "The Mac slept after T3 Code finished. Keep-awake turns back on when you open the lid."
+                 : "Turn keep-awake on for this to apply. Without it, closing the lid sleeps the Mac right away.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -424,6 +467,14 @@ struct SettingsPage: View {
                     Text("Only keep awake while Codex is running")
                     Text(snapshot.isCodexRunning ? "Codex is running" : "Codex is not running")
                 }
+                Toggle(isOn: Binding(
+                    get: { snapshot.isT3SleepEnabled },
+                    set: { _ in model.actions?.uiToggleT3Sleep() })) {
+                    Text("Sleep when T3 Code threads finish (lid closed)")
+                    Text(snapshot.t3Status.map { "\($0). " } ?? "")
+                        + Text("Sleeps 1 minute after no thread is working or waiting. Keep-awake turns back on when you open the lid.")
+                }
+                .accessibilityIdentifier("t3SleepToggle")
             }
             Section("Privileged helper") {
                 LabeledContent("Status", value: snapshot.helperStatus)
