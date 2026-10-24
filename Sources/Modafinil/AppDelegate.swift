@@ -70,6 +70,10 @@ final class AppDelegate: NSObject,
     private var lastT3Activity: T3Activity?
     private var lastT3ActivityAt: Date?
     private var t3SleepAt: Date?
+    private var isQuitBlockersEnabled = UserDefaults.standard.bool(forKey: AppDelegate.quitBlockersDefaultsKey)
+    private var quitBlockersTimer: Timer?
+    private var quitBlockersArmedFor: Date?
+    private var quitBlockersActivity: NSObjectProtocol?
     /// Labels the next helper sleep receipt, which the helper records as a generic request.
     private var pendingSleepSource: (source: String, at: Date)?
 
@@ -181,6 +185,7 @@ final class AppDelegate: NSObject,
         codexRuntimeTimer?.invalidate()
         t3WatchTimer?.invalidate()
         endT3WatchActivity()
+        quitBlockersTimer?.invalidate()
         provisionalWakeLeaseTimer?.invalidate()
         scheduledWakeTimer?.invalidate()
         statusPopover.performClose(nil)
@@ -769,6 +774,12 @@ final class AppDelegate: NSObject,
 
     func uiToggleT3Sleep() { toggleT3Sleep() }
 
+    func uiToggleQuitBlockers() { toggleQuitBlockers() }
+
+    func uiSetQuitExclusion(bundleID: String, name: String, excluded: Bool) {
+        setQuitExclusion(bundleID: bundleID, name: name, excluded: excluded)
+    }
+
     func uiToggleLoginItem() { toggleLoginItem() }
 
     func uiScheduleSleep(after seconds: Int) {
@@ -983,6 +994,7 @@ final class AppDelegate: NSObject,
             scheduledSleepDate = journal.schedule?.date
             sleepAttempt = journal.attempt
             if let attempt = sleepAttempt { noteSleepAttemptIfChanged(attempt) }
+            armQuitBlockersTimer()
             if let attempt = sleepAttempt {
                 if !isToggleInFlight && (attempt.phase == .pending || (attempt.id != lastHandledSleepAttemptID && attempt.phase != .cancelled)) {
                     // The helper's timer is authoritative even while this UI is suspended.
@@ -1111,7 +1123,7 @@ final class AppDelegate: NSObject,
     ) {
         // An explicit sleep from the iPhone: keep-awake stays off afterwards.
         isKeepAwakeSuspendedForT3Sleep = false
-        requestSystemSleep { [weak self] result in
+        requestSystemSleep(source: "iPhone") { [weak self] result in
             guard let self else { return }
             switch result {
             case .success:
@@ -1127,7 +1139,7 @@ final class AppDelegate: NSObject,
 
     /// Turns keep-awake off and asks the helper to sleep the Mac now. Arms
     /// remote wake recovery, like a sleep timer.
-    private func requestSystemSleep(completion: @escaping (Result<Void, Error>) -> Void) {
+    private func requestSystemSleep(source: String, completion: @escaping (Result<Void, Error>) -> Void) {
         guard !isToggleInFlight else {
             completion(.failure(
                 CompanionRemoteError("Modafinil is already updating the sleep setting.")
@@ -1148,6 +1160,8 @@ final class AppDelegate: NSObject,
         let previousRequestedState = isSleepPreventionRequested
         let previousProvisionalLease = isProvisionalWakeLeaseActive
 
+        // The helper retries for about 30 s, which gives the apps time to quit.
+        quitSleepBlockingApps(before: source)
         lastError = nil
         companionConfigurationStore.isWakeArmed = true
         cancelProvisionalWakeLease()
@@ -1365,6 +1379,95 @@ final class AppDelegate: NSObject,
         reconcileSleepPreventionWithCurrentMode()
     }
 
+    // MARK: Quit apps that keep the Mac awake
+
+    @objc private func toggleQuitBlockers() {
+        isQuitBlockersEnabled.toggle()
+        UserDefaults.standard.set(isQuitBlockersEnabled, forKey: Self.quitBlockersDefaultsKey)
+        historyRecorder.note("Quit apps keeping the Mac awake before sleep \(isQuitBlockersEnabled ? "on" : "off")")
+        armQuitBlockersTimer()
+        refreshIcon()
+    }
+
+    /// Bundle identifier → name of apps the user never wants quit.
+    private var quitBlockersExclusions: [String: String] {
+        get { UserDefaults.standard.dictionary(forKey: Self.quitBlockersExclusionsDefaultsKey) as? [String: String] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: Self.quitBlockersExclusionsDefaultsKey) }
+    }
+
+    private func setQuitExclusion(bundleID: String, name: String, excluded: Bool) {
+        var exclusions = quitBlockersExclusions
+        exclusions[bundleID] = excluded ? name : nil
+        quitBlockersExclusions = exclusions
+        refreshUI()
+    }
+
+    private static func regularApp(pid: Int32) -> SleepBlockerApps.App? {
+        guard pid != getpid(), let app = NSRunningApplication(processIdentifier: pid),
+              app.activationPolicy == .regular, let bundleID = app.bundleIdentifier else { return nil }
+        return SleepBlockerApps.App(pid: pid, bundleID: bundleID, name: app.localizedName ?? bundleID)
+    }
+
+    private func sleepBlockingApps() -> [SleepBlockerApps.App] {
+        SleepBlockerApps.candidates(
+            assertions: SleepBlockers.readAssertions(),
+            excludedBundleIDs: Set(quitBlockersExclusions.keys),
+            regularApp: Self.regularApp
+        )
+    }
+
+    /// Asks apps that keep the Mac awake to quit, like ⌘Q: they can still ask to save.
+    private func quitSleepBlockingApps(before source: String) {
+        guard isQuitBlockersEnabled else { return }
+        let apps = sleepBlockingApps()
+        guard !apps.isEmpty else { return }
+        var asked: [String] = []
+        for app in apps where NSRunningApplication(processIdentifier: app.pid)?.terminate() == true {
+            asked.append(app.name)
+        }
+        guard !asked.isEmpty else { return }
+        historyRecorder.note("Asked \(asked.joined(separator: ", ")) to quit before sleep (\(source))")
+    }
+
+    /// For a sleep timer, apps are asked to quit 1 minute before it fires.
+    private func armQuitBlockersTimer() {
+        let target = isQuitBlockersEnabled ? scheduledSleepDate : nil
+        guard target != quitBlockersArmedFor else { return }
+        quitBlockersTimer?.invalidate()
+        quitBlockersTimer = nil
+        quitBlockersArmedFor = target
+        guard let deadline = target, deadline > Date() else {
+            if let activity = quitBlockersActivity {
+                ProcessInfo.processInfo.endActivity(activity)
+                quitBlockersActivity = nil
+            }
+            return
+        }
+        // Keeps App Nap from delaying the timer while the display is off. Creates no
+        // power assertion and does not prevent sleep.
+        if quitBlockersActivity == nil {
+            quitBlockersActivity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep,
+                reason: "Quitting apps that keep the Mac awake before the sleep timer"
+            )
+        }
+        let fire = max(Date(), deadline.addingTimeInterval(-60))
+        let timer = Timer(fire: fire, interval: 0, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.quitBlockersTimer = nil
+                if let activity = self.quitBlockersActivity {
+                    ProcessInfo.processInfo.endActivity(activity)
+                    self.quitBlockersActivity = nil
+                }
+                guard self.scheduledSleepDate == deadline else { return }
+                self.quitSleepBlockingApps(before: "sleep timer")
+            }
+        }
+        quitBlockersTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
     // MARK: Sleep when T3 Code threads finish
 
     @objc private func toggleT3Sleep() {
@@ -1463,7 +1566,7 @@ final class AppDelegate: NSObject,
         historyRecorder.note("T3 Code finished: sleeping with the lid closed")
         pendingSleepSource = ("T3 Code finished", Date())
         isKeepAwakeSuspendedForT3Sleep = true
-        requestSystemSleep { [weak self] result in
+        requestSystemSleep(source: "T3 Code finished") { [weak self] result in
             guard let self, case .failure(let error) = result else { return }
             self.isKeepAwakeSuspendedForT3Sleep = false
             self.pendingSleepSource = nil
@@ -1669,6 +1772,15 @@ final class AppDelegate: NSObject,
         t3SleepItem.state = isT3SleepEnabled ? .on : .off
         menu.addItem(t3SleepItem)
 
+        let quitBlockersItem = NSMenuItem(
+            title: "Quit Apps Keeping the Mac Awake Before Sleep",
+            action: #selector(toggleQuitBlockers),
+            keyEquivalent: ""
+        )
+        quitBlockersItem.target = self
+        quitBlockersItem.state = isQuitBlockersEnabled ? .on : .off
+        menu.addItem(quitBlockersItem)
+
         let loginItem = NSMenuItem(title: "Open at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
         loginItem.target = self
         loginItem.state = loginItems.isEnabled ? .on : .off
@@ -1754,6 +1866,17 @@ final class AppDelegate: NSObject,
         }
         snapshot.t3SleepAt = t3SleepAt
         snapshot.isT3RestorePending = isKeepAwakeSuspendedForT3Sleep
+        snapshot.isQuitBlockersEnabled = isQuitBlockersEnabled
+        let exclusions = quitBlockersExclusions
+        snapshot.quitExclusions = exclusions.map { AppChoice(bundleID: $0.key, name: $0.value) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        snapshot.quitCandidates = sleepBlockingApps().map(\.name)
+        var seen = Set<String>()
+        snapshot.excludableApps = NSWorkspace.shared.runningApplications.compactMap { app -> AppChoice? in
+            guard app.activationPolicy == .regular, let id = app.bundleIdentifier, app.processIdentifier != getpid(),
+                  !SleepBlockerApps.isProtected(bundleID: id), exclusions[id] == nil, seen.insert(id).inserted else { return nil }
+            return AppChoice(bundleID: id, name: app.localizedName ?? id)
+        }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         snapshot.helperStatus = helperStatusDescription
         snapshot.isHelperEnabled = helperStatus == .enabled
         snapshot.scheduledSleepDate = scheduledSleepDate
@@ -1888,4 +2011,6 @@ final class AppDelegate: NSObject,
     private static let codexRuntimeLimitEnabledDefaultsKey = "CodexRuntimeLimitEnabled"
     private static let t3SleepEnabledDefaultsKey = "T3SleepWhenFinishedEnabled"
     private static let t3SleepRestoreDefaultsKey = "T3SleepRestoreKeepAwake"
+    private static let quitBlockersDefaultsKey = "QuitSleepBlockersBeforeSleep"
+    private static let quitBlockersExclusionsDefaultsKey = "QuitSleepBlockersExclusions"
 }

@@ -59,6 +59,22 @@ restored and both test timers were cleared. Because power was connected during
 sleep, this validates the sleep path and recovery but is not an isolated proof
 of the scheduled wake source.
 
+## Quit apps that keep the Mac awake before sleep (Mac 0.9.0)
+
+Optional, in **Settings → Before sleeping** or the right-click menu. When Modafinil puts
+the Mac to sleep (sleep timer, iPhone **Sleep Mac**, or T3 Code finishing), it first asks
+apps that keep the Mac awake to quit, as with ⌘Q, so they can still ask to save. For a
+sleep timer this happens 1 minute before it fires; for an immediate sleep, the helper's
+retries over about 30 seconds give the apps time to close.
+
+- An app counts when it, one of its helper processes, or a system service on its behalf
+  (for example `coreaudiod` playing a browser tab's audio) holds a power assertion that
+  prevents system sleep, idle sleep or display sleep. Background macOS work does not count.
+- Never quit: T3 Code, Codex, ChatGPT, Claude, terminals, Xcode, VS Code, Cursor, the Finder
+  and Modafinil, plus any app you add under **Never Quit Another App…**.
+- Settings shows which apps would be quit right now. Each quit request is recorded in
+  Sleep History. An app showing a save dialog stays open; the sleep result then names it.
+
 ## Sleep when T3 Code threads finish (Mac 0.7.0, switch everywhere in 0.7.1)
 
 It is an on/off switch, off by default: in the menu bar popover, on the Overview page, in

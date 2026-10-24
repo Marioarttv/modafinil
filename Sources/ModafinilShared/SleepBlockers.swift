@@ -48,8 +48,12 @@ public enum SleepBlockers {
         public var processName: String
         public var type: String
         public var name: String
-        public init(pid: Int32, processName: String, type: String, name: String) {
+        /// Set when a system service holds the assertion for an app, e.g. coreaudiod
+        /// playing Chrome's audio ("Created for PID" in `pmset -g assertions`).
+        public var onBehalfOfPID: Int32?
+        public init(pid: Int32, processName: String, type: String, name: String, onBehalfOfPID: Int32? = nil) {
             self.pid = pid; self.processName = processName; self.type = type; self.name = name
+            self.onBehalfOfPID = onBehalfOfPID
         }
     }
 
@@ -70,7 +74,9 @@ public enum SleepBlockers {
                 let type = assertion["AssertType"] as? String ?? ""
                 let name = assertion["AssertName"] as? String ?? ""
                 let processName = (assertion["Process Name"] as? String) ?? processName(for: pid)
-                result.append(Assertion(pid: pid, processName: processName, type: type, name: name))
+                let onBehalf = (assertion["AssertionOnBehalfOfPID"] as? NSNumber)?.int32Value
+                result.append(Assertion(pid: pid, processName: processName, type: type, name: name,
+                                        onBehalfOfPID: onBehalf.flatMap { $0 > 0 && $0 != pid ? $0 : nil }))
             }
         }
         return result
