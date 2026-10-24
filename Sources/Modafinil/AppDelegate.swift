@@ -3,14 +3,14 @@ import notify
 import ModafinilShared
 import ModafinilRemoteProtocol
 import ServiceManagement
+import SwiftUI
 
 final class AppDelegate: NSObject,
     NSApplicationDelegate,
     NSPopoverDelegate,
     CompanionServerDelegate,
     CompanionSetupWindowControllerDelegate,
-    StatusPopoverViewControllerDelegate,
-    StatusWindowControllerDelegate
+    AppUIActions
 {
     private let helperClient = PrivilegedHelperClient()
     private let helperInstaller = PrivilegedHelperInstaller()
@@ -21,7 +21,8 @@ final class AppDelegate: NSObject,
     private let powerMonitor = PowerEventMonitor()
     private let historyRecorder = PowerHistoryRecorder()
     private let loginItems = LoginItemController()
-    private var historyWindowController: SleepHistoryWindowController?
+    private let uiModel = AppUIModel()
+    private var mainWindowController: MainWindowController?
     private var journalNotifyToken: Int32?
     private var assertionNotifyToken: Int32?
     private var isAssertionRefreshScheduled = false
@@ -35,8 +36,6 @@ final class AppDelegate: NSObject,
     private var companionServer: CompanionServer?
     private var companionSetupWindowController: CompanionSetupWindowController?
     private var statusItem: NSStatusItem!
-    private var statusPopoverViewController: StatusPopoverViewController?
-    private var statusWindowController: StatusWindowController?
     private var isSleepPreventionEnabled = false
     private var isSleepPreventionRequested = false
     private var hasLoadedInitialSleepRequest = false
@@ -170,7 +169,7 @@ final class AppDelegate: NSObject,
         provisionalWakeLeaseTimer?.invalidate()
         scheduledWakeTimer?.invalidate()
         statusPopover.performClose(nil)
-        statusWindowController?.close()
+        mainWindowController?.close()
         companionSetupWindowController?.close()
         companionServer?.stop()
         helperClient.invalidate()
@@ -272,11 +271,14 @@ final class AppDelegate: NSObject,
     private func scheduleProvisionalWakeLeaseExpiration() {
         provisionalWakeLeaseTimer?.invalidate()
         let timer = Timer(timeInterval: 90, repeats: false) { [weak self] _ in
-            guard let self else { return }
-            self.isProvisionalWakeLeaseActive = false
-            self.provisionalWakeLeaseTimer = nil
-            self.keepAwakeChangeSource = "wake recovery ended"
-            self.reconcileSleepPreventionWithCurrentMode()
+            // Added to the main run loop below.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.isProvisionalWakeLeaseActive = false
+                self.provisionalWakeLeaseTimer = nil
+                self.keepAwakeChangeSource = "wake recovery ended"
+                self.reconcileSleepPreventionWithCurrentMode()
+            }
         }
         provisionalWakeLeaseTimer = timer
         RunLoop.main.add(timer, forMode: .common)
@@ -665,40 +667,38 @@ final class AppDelegate: NSObject,
 
     private func setControlsEnabled(_ enabled: Bool) {
         statusItem?.button?.isEnabled = enabled
-        statusPopoverViewController?.view.window?.ignoresMouseEvents = !enabled
-        statusWindowController?.window?.ignoresMouseEvents = !enabled
+        statusPopover.contentViewController?.view.window?.ignoresMouseEvents = !enabled
+        mainWindowController?.window?.ignoresMouseEvents = !enabled
     }
 
     @objc private func showStatusWindow() {
+        showMainWindow(section: nil)
+    }
+
+    private func showMainWindow(section: AppSection?) {
         refreshHelperStatus()
         refreshCodexRuntimeState(shouldReconcile: false)
         statusPopover.performClose(nil)
+        if let section { uiModel.section = section }
+        uiModel.actions = self
 
-        let windowController: StatusWindowController
-        if let existingWindowController = statusWindowController {
-            windowController = existingWindowController
-        } else {
-            let viewController = StatusPopoverViewController(presentation: .window)
-            viewController.delegate = self
-
-            windowController = StatusWindowController(statusViewController: viewController)
-            windowController.statusWindowDelegate = self
-            statusWindowController = windowController
-        }
-
-        windowController.update(with: makeStatusViewModel())
+        let controller = mainWindowController ?? {
+            let controller = MainWindowController(model: uiModel)
+            controller.onClose = { [weak self] in
+                self?.mainWindowController = nil
+                self?.updateActivationPolicy()
+            }
+            mainWindowController = controller
+            return controller
+        }()
+        historyRecorder.recordWake()
+        uiModel.snapshot = makeSnapshot()
+        uiModel.historyRevision &+= 1
         NSApp.setActivationPolicy(.regular)
-        windowController.showWindow(nil)
+        controller.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
-        windowController.window?.makeKeyAndOrderFront(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
         updateAssertionObservation()
-    }
-
-    func statusWindowControllerDidClose(_ windowController: StatusWindowController) {
-        guard statusWindowController === windowController else { return }
-
-        statusWindowController = nil
-        updateActivationPolicy()
     }
 
     @objc private func showStatusPopover() {
@@ -712,67 +712,84 @@ final class AppDelegate: NSObject,
             return
         }
 
-        let viewController = statusPopoverViewController ?? StatusPopoverViewController()
-        viewController.delegate = self
-        viewController.update(with: makeStatusViewModel())
-        statusPopoverViewController = viewController
-
+        uiModel.actions = self
+        uiModel.snapshot = makeSnapshot()
+        if statusPopover.contentViewController == nil {
+            let host = NSHostingController(rootView: MenuBarPopoverView().environmentObject(uiModel))
+            host.sizingOptions = .preferredContentSize
+            statusPopover.contentViewController = host
+        }
         statusPopover.behavior = .transient
         if statusPopover.delegate == nil { statusPopover.delegate = self }
         statusPopover.animates = true
-        statusPopover.contentViewController = viewController
         statusPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         updateAssertionObservation()
     }
 
-    private func refreshStatusPopover() {
-        guard statusPopover.isShown else { return }
-        statusPopoverViewController?.update(with: makeStatusViewModel())
+    private var isAnyStatusViewVisible: Bool {
+        statusPopover.isShown || mainWindowController?.window?.isVisible == true
     }
 
-    private func refreshStatusWindow() {
-        guard statusWindowController?.window?.isVisible == true else { return }
-        statusWindowController?.update(with: makeStatusViewModel())
+    private func refreshStatusPopover() { refreshUI() }
+
+    private func refreshStatusWindow() { refreshUI() }
+
+    /// Rebuilds the snapshot only while a Modafinil view is on screen.
+    private func refreshUI() {
+        guard isAnyStatusViewVisible else { return }
+        uiModel.snapshot = makeSnapshot()
     }
 
-    func statusPopoverDidToggleSleepPrevention(_ viewController: StatusPopoverViewController) {
-        toggleSleepPrevention()
-    }
+    // MARK: AppUIActions
 
-    func statusPopoverDidToggleCodexRuntimeLimit(_ viewController: StatusPopoverViewController) {
-        toggleCodexRuntimeLimit()
-    }
+    func uiToggleKeepAwake() { toggleSleepPrevention() }
 
-    func statusPopover(_ viewController: StatusPopoverViewController, didScheduleSleepAfter seconds: Int) {
+    func uiToggleCodexLimit() { toggleCodexRuntimeLimit() }
+
+    func uiToggleLoginItem() { toggleLoginItem() }
+
+    func uiScheduleSleep(after seconds: Int) {
         scheduleSleep(argument: String(seconds), source: "Mac") { [weak self] result in
             switch result {
-            case .success:
-                self?.lastError = nil
-            case .failure(let error):
-                self?.lastError = error.localizedDescription
+            case .success: self?.lastError = nil
+            case .failure(let error): self?.lastError = error.localizedDescription
             }
             self?.refreshIcon()
         }
     }
 
-    func statusPopoverDidCancelScheduledSleep(_ viewController: StatusPopoverViewController) {
-        cancelScheduledSleep(source: "Mac")
+    func uiCancelSleepTimer() { cancelScheduledSleep(source: "Mac") }
+
+    func uiScheduleWake(at date: Date) {
+        setScheduledWake(date, source: "Mac") { [weak self] result in
+            if case .failure(let error) = result { self?.lastError = error.localizedDescription }
+            else { self?.lastError = nil }
+            self?.refreshIcon()
+        }
     }
 
-    func statusPopoverDidOpenCompanionSetup(_ viewController: StatusPopoverViewController) {
-        showCompanionSetup()
+    func uiCancelWake() {
+        setScheduledWake(nil, source: "Mac") { [weak self] result in
+            if case .failure(let error) = result { self?.lastError = error.localizedDescription }
+            self?.refreshIcon()
+        }
     }
 
-    func statusPopoverDidOpenBackgroundSettings(_ viewController: StatusPopoverViewController) {
-        openSettings()
+    func uiOpenCompanionSetup() { showCompanionSetup() }
+
+    func uiOpenBackgroundSettings() { openSettings() }
+
+    func uiOpenMainWindow(_ section: AppSection) { showMainWindow(section: section) }
+
+    func uiQuit() {
+        statusPopover.performClose(nil)
+        quit()
     }
 
-    func statusPopoverDidOpenSleepHistory(_ viewController: StatusPopoverViewController) {
-        showSleepHistory()
-    }
+    func uiUninstall() { uninstallApp() }
 
-    func statusPopoverDidToggleLoginItem(_ viewController: StatusPopoverViewController) {
-        toggleLoginItem()
+    func uiTimeline(from: Date, to: Date) -> (segments: [PowerSegment], markers: [PowerMarker]) {
+        historyRecorder.timeline(from: from, to: to)
     }
 
     @objc private func toggleLoginItem() {
@@ -785,36 +802,17 @@ final class AppDelegate: NSObject,
     }
 
     @objc private func showSleepHistory() {
-        statusPopover.performClose(nil)
-        let controller = historyWindowController ?? {
-            let controller = SleepHistoryWindowController()
-            controller.loadTimeline = { [weak self] from, to in
-                self?.historyRecorder.timeline(from: from, to: to) ?? ([], [])
-            }
-            controller.onClose = { [weak self] in
-                self?.historyWindowController = nil
-                self?.updateActivationPolicy()
-            }
-            historyWindowController = controller
-            return controller
-        }()
-        historyRecorder.recordWake()
-        controller.reload()
-        NSApp.setActivationPolicy(.regular)
-        controller.showWindow(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        controller.window?.makeKeyAndOrderFront(nil)
+        showMainWindow(section: .history)
     }
 
     private func refreshHistoryWindow() {
-        guard historyWindowController?.window?.isVisible == true else { return }
-        historyWindowController?.reload()
+        guard isAnyStatusViewVisible else { return }
+        uiModel.historyRevision &+= 1
     }
 
     private func updateActivationPolicy() {
-        let anyVisible = statusWindowController?.window?.isVisible == true
+        let anyVisible = mainWindowController?.window?.isVisible == true
             || companionSetupWindowController?.window?.isVisible == true
-            || historyWindowController?.window?.isVisible == true
         if !anyVisible { NSApp.setActivationPolicy(.accessory) }
         updateAssertionObservation()
     }
@@ -822,7 +820,7 @@ final class AppDelegate: NSObject,
     /// Watches other apps' power assertions only while a Modafinil status view is
     /// visible, refreshing at most once per second.
     private func updateAssertionObservation() {
-        let visible = statusWindowController?.window?.isVisible == true || statusPopover.isShown
+        let visible = isAnyStatusViewVisible
         if visible, assertionNotifyToken == nil {
             var token: Int32 = 0
             let status = notify_register_dispatch("com.apple.system.powermanagement.assertions.anychange", &token, .main) { [weak self] _ in
@@ -830,8 +828,7 @@ final class AppDelegate: NSObject,
                 self.isAssertionRefreshScheduled = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
                     self?.isAssertionRefreshScheduled = false
-                    self?.refreshStatusPopover()
-                    self?.refreshStatusWindow()
+                    self?.refreshUI()
                 }
             }
             if status == UInt32(NOTIFY_STATUS_OK) { assertionNotifyToken = token }
@@ -839,11 +836,6 @@ final class AppDelegate: NSObject,
             notify_cancel(token)
             assertionNotifyToken = nil
         }
-    }
-
-    func statusPopoverDidQuit(_ viewController: StatusPopoverViewController) {
-        statusPopover.performClose(nil)
-        quit()
     }
 
     func companionServerCurrentState(_ server: CompanionServer) -> RemoteState {
@@ -1232,7 +1224,7 @@ final class AppDelegate: NSObject,
         scheduledWakeTimer = nil
         guard let date = scheduledWakeDate else { return }
         let timer = Timer(fire: date, interval: 0, repeats: false) { [weak self] _ in
-            _ = self?.completeScheduledWakeIfDue()
+            MainActor.assumeIsolated { _ = self?.completeScheduledWakeIfDue() }
         }
         scheduledWakeTimer = timer
         RunLoop.main.add(timer, forMode: .common)
@@ -1259,20 +1251,6 @@ final class AppDelegate: NSObject,
         return true
     }
 
-    func statusPopover(_ viewController: StatusPopoverViewController, didScheduleWakeAt date: Date) {
-        setScheduledWake(date, source: "Mac") { [weak self] result in
-            if case .failure(let error) = result { self?.lastError = error.localizedDescription }
-            self?.refreshIcon()
-        }
-    }
-
-    func statusPopoverDidCancelScheduledWake(_ viewController: StatusPopoverViewController) {
-        setScheduledWake(nil, source: "Mac") { [weak self] result in
-            if case .failure(let error) = result { self?.lastError = error.localizedDescription }
-            self?.refreshIcon()
-        }
-    }
-
     private func updateCodexRuntimeMonitoring() {
         codexRuntimeTimer?.invalidate()
         codexRuntimeTimer = nil
@@ -1280,7 +1258,7 @@ final class AppDelegate: NSObject,
         guard isCodexRuntimeLimitEnabled else { return }
 
         let timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
-            self?.refreshCodexRuntimeState()
+            MainActor.assumeIsolated { self?.refreshCodexRuntimeState() }
         }
         codexRuntimeTimer = timer
         RunLoop.main.add(timer, forMode: .common)
@@ -1507,33 +1485,41 @@ final class AppDelegate: NSObject,
         statusItem.menu = nil
     }
 
-    private func makeStatusViewModel() -> StatusPopoverViewController.ViewModel {
+    private func makeSnapshot() -> AppSnapshot {
         synchronizeSleepJournal()
         synchronizeWakeSchedule()
-        return StatusPopoverViewController.ViewModel(
-            symbolName: statusSymbolName,
-            symbolColor: statusSymbolColor,
-            title: statusTitle,
-            explanation: statusExplanation,
-            requestedStatus: isAwakeRequestedForStatus ? "On" : "Off",
-            effectiveStatus: effectiveSleepPreventionStatus,
-            codexLimitStatus: isCodexRuntimeLimitEnabled ? "Enabled" : "Disabled",
-            codexStatus: isCodexRunning ? "Running" : "Not running",
-            helperStatus: helperStatusDescription,
-            primaryActionTitle: isAwakeRequestedForStatus ? "Turn Off" : "Turn On",
-            isPrimaryActionEnabled: !isToggleInFlight,
-            isCodexRuntimeLimitEnabled: isCodexRuntimeLimitEnabled,
-            scheduledSleepDate: scheduledSleepDate,
-            sleepAttemptDescription: sleepAttemptDescription,
-            canScheduleSleep: helperStatus == .enabled && !isToggleInFlight && !isQuitInProgress,
-            scheduledWakeDate: scheduledWakeDate,
-            canScheduleWake: helperStatus == .enabled && !isWakeScheduleInFlight && !isQuitInProgress,
-            lastError: lastError,
-            loginItemStatus: loginItems.statusDescription,
-            isLoginItemEnabled: loginItems.isEnabled,
-            companionStatus: companionAccessStatus,
-            blockers: SleepBlockers.current()
-        )
+        var snapshot = AppSnapshot()
+        snapshot.tone = isToggleInFlight ? .busy
+            : isSleepPreventionEnabled ? .active
+            : isWaitingForCodex ? .waiting
+            : sleepAttempt?.phase == .failed ? .warning
+            : .off
+        snapshot.title = statusTitle
+        snapshot.explanation = statusExplanation
+        snapshot.isKeepAwakeRequested = isAwakeRequestedForStatus
+        snapshot.isSleepPreventionActive = isSleepPreventionEnabled
+        snapshot.isBusy = isToggleInFlight || isQuitInProgress
+        snapshot.isCodexLimitEnabled = isCodexRuntimeLimitEnabled
+        snapshot.isCodexRunning = isCodexRunning
+        snapshot.helperStatus = helperStatusDescription
+        snapshot.isHelperEnabled = helperStatus == .enabled
+        snapshot.scheduledSleepDate = scheduledSleepDate
+        snapshot.scheduledWakeDate = scheduledWakeDate
+        snapshot.canScheduleSleep = helperStatus == .enabled && !isToggleInFlight && !isQuitInProgress
+        snapshot.canScheduleWake = helperStatus == .enabled && !isWakeScheduleInFlight && !isQuitInProgress
+        snapshot.sleepAttempt = sleepAttempt
+        snapshot.lastError = sleepHistoryError ?? lastError
+        snapshot.loginItemStatus = loginItems.statusDescription
+        snapshot.isLoginItemEnabled = loginItems.isEnabled
+        snapshot.companionStatus = companionAccessStatus
+        snapshot.isRemoteWakeArmed = companionConfigurationStore.isWakeArmed
+        snapshot.isWakeRecoveryActive = isProvisionalWakeLeaseActive
+        snapshot.tailscaleAddress = CompanionNetworkInformation.discover().tailscaleIPv4
+        snapshot.relayHost = companionConfigurationStore.relayHost
+        snapshot.blockers = SleepBlockers.current()
+        let info = Bundle.main.infoDictionary
+        snapshot.version = "\(info?["CFBundleShortVersionString"] as? String ?? "?") (\(info?["CFBundleVersion"] as? String ?? "?"))"
+        return snapshot
     }
 
     private var statusTitle: String {
@@ -1585,48 +1571,6 @@ final class AppDelegate: NSObject,
 
     private var isAwakeRequestedForStatus: Bool {
         isSleepPreventionRequested || isProvisionalWakeLeaseActive
-    }
-
-    private var statusSymbolName: String {
-        if isToggleInFlight {
-            return "arrow.triangle.2.circlepath"
-        }
-
-        if isSleepPreventionEnabled {
-            return "eye.fill"
-        }
-
-        if isWaitingForCodex {
-            return "clock"
-        }
-
-        if sleepAttempt?.phase == .failed { return "exclamationmark.triangle.fill" }
-        return Self.inactiveSymbolName
-    }
-
-    private var statusSymbolColor: NSColor {
-        if isToggleInFlight {
-            return .systemBlue
-        }
-
-        if isSleepPreventionEnabled {
-            return .systemGreen
-        }
-
-        if isWaitingForCodex {
-            return .systemOrange
-        }
-
-        if sleepAttempt?.phase == .failed { return .systemOrange }
-        return .secondaryLabelColor
-    }
-
-    private var effectiveSleepPreventionStatus: String {
-        if isToggleInFlight {
-            return "Updating"
-        }
-
-        return isSleepPreventionEnabled ? "Active" : "Inactive"
     }
 
     private var helperStatusDescription: String {

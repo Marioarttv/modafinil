@@ -59,6 +59,21 @@ restored and both test timers were cleared. Because power was connected during
 sleep, this validates the sleep path and recovery but is not an isolated proof
 of the scheduled wake source.
 
+## Redesigned Mac window (Mac 0.6.0)
+
+The Modafinil window now uses a sidebar with five pages instead of one long column:
+
+- **Overview**: status with the on/off button, timer, alarm, iPhone and last-sleep tiles, and other apps affecting sleep.
+- **Timers**: sleep timer presets or custom minutes with a live countdown, next to the wake alarm.
+- **Sleep History**: totals, a timeline chart, wake causes and an event table, for 24 hours, 7 days or a single day.
+- **iPhone**: access status, Tailscale and relay addresses, recent iPhone actions, pairing.
+- **Settings**: open at login, Codex mode, helper status, quit and uninstall.
+
+The menu bar popover is a compact card with a keep-awake switch, sleep timer presets,
+the wake alarm, iPhone status and a 24-hour strip. The interface is SwiftUI (macOS 13+).
+It reads data only while visible, so it adds no background work. Behaviour, the helper
+and the iPhone protocol are unchanged; no phone or relay update is needed.
+
 ## Sleep history, sleep blockers and reliability (Mac 0.5.0 / Companion 1.6)
 
 **Sleep History…** (menu or status window) shows when the Mac was awake, in a
