@@ -102,9 +102,7 @@ struct OverviewPage: View {
                 }
             }
 
-            if snapshot.isT3SleepEnabled {
-                T3SleepCard(snapshot: snapshot)
-            }
+            T3SleepCard(snapshot: snapshot) { model.actions?.uiToggleT3Sleep() }
 
             BlockersCard(blockers: snapshot.blockers)
         }
@@ -113,10 +111,20 @@ struct OverviewPage: View {
 
 struct T3SleepCard: View {
     let snapshot: AppSnapshot
+    let toggle: () -> Void
 
     var body: some View {
         Card(title: "Sleep when T3 Code finishes", symbol: "moon.stars.fill") {
-            if let sleepAt = snapshot.t3SleepAt, sleepAt > Date() {
+            Toggle(isOn: Binding(get: { snapshot.isT3SleepEnabled }, set: { _ in toggle() })) {
+                Text("Sleep with the lid closed once all T3 threads finish")
+            }
+            .toggleStyle(.switch)
+            .accessibilityIdentifier("overviewT3Sleep")
+            if !snapshot.isT3SleepEnabled {
+                Text("Off. The Mac stays awake with the lid closed for as long as keep-awake is on.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if let sleepAt = snapshot.t3SleepAt, sleepAt > Date() {
                 HStack(spacing: 6) {
                     Text("T3 Code has finished. Sleeping in")
                     Text(timerInterval: Date()...sleepAt, countsDown: true).monospacedDigit()
@@ -138,6 +146,7 @@ struct T3SleepCard: View {
             if snapshot.t3Threads.count > 6 {
                 Text("and \(snapshot.t3Threads.count - 6) more").font(.caption).foregroundStyle(.secondary)
             }
+            if snapshot.isT3SleepEnabled {
             Text(snapshot.isKeepAwakeRequested
                  ? "With the lid closed and no external display, the Mac sleeps 1 minute after the last T3 thread stops working or waiting. Keep-awake turns back on when you open the lid."
                  : snapshot.isT3RestorePending
@@ -146,6 +155,7 @@ struct T3SleepCard: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }

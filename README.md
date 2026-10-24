@@ -59,9 +59,10 @@ restored and both test timers were cleared. Because power was connected during
 sleep, this validates the sleep path and recovery but is not an isolated proof
 of the scheduled wake source.
 
-## Sleep when T3 Code threads finish (Mac 0.7.0)
+## Sleep when T3 Code threads finish (Mac 0.7.0, switch everywhere in 0.7.1)
 
-Turn on **Sleep when T3 Code threads finish (lid closed)** in Settings or the right-click menu.
+It is an on/off switch, off by default: in the menu bar popover, on the Overview page, in
+Settings and in the right-click menu (**Sleep When T3 Threads Finish (Lid Closed)**).
 While keep-awake is on, the lid is closed and no external display is connected, Modafinil
 checks [T3 Code](https://github.com/pingdotgg/t3code) every 15 seconds. When no thread has
 been working or waiting for 1 minute, it turns keep-awake off and puts the Mac to sleep,

@@ -65,17 +65,25 @@ struct MenuBarPopoverView: View {
                 row("iPhone", symbol: "iphone", tint: .blue) {
                     Text(snapshot.companionStatus).foregroundStyle(.secondary)
                 }
-                if snapshot.isT3SleepEnabled {
-                    row("T3 Code", symbol: "moon.stars.fill", tint: .indigo) {
+                row("Sleep when T3 finishes", symbol: "moon.stars.fill", tint: .indigo) {
+                    if snapshot.isT3SleepEnabled {
                         if let sleepAt = snapshot.t3SleepAt, sleepAt > now {
-                            Text("Sleeping in")
                             Text(timerInterval: now...sleepAt, countsDown: true).monospacedDigit()
                         } else {
                             Text(Self.t3Short(snapshot)).foregroundStyle(.secondary)
                         }
                     }
-                    .help(snapshot.t3Status ?? "")
+                    Toggle("Sleep when T3 Code threads finish", isOn: Binding(
+                        get: { snapshot.isT3SleepEnabled },
+                        set: { _ in model.actions?.uiToggleT3Sleep() }))
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .labelsHidden()
+                        .accessibilityIdentifier("popoverT3Sleep")
                 }
+                .help(snapshot.isT3SleepEnabled
+                      ? (snapshot.t3Status ?? "") + ". With the lid closed, the Mac sleeps 1 minute after T3 finishes."
+                      : "Off. Turn on to sleep the Mac with the lid closed once T3 Code threads finish.")
             }
 
             VStack(alignment: .leading, spacing: 6) {
