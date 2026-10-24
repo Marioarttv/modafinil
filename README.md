@@ -26,7 +26,7 @@ Left click to open the status window, where you can see why Modafinil is active,
 
 Opening Modafinil from Launchpad or Finder shows the same controls in a regular app window, even when the menu bar icon is hidden because the menu bar is full. Closing that window returns Modafinil to its lightweight menu bar mode.
 
-The menu also includes an "Only While Codex Is Running" option. When enabled, Modafinil keeps sleep prevention requested but only applies it while a Codex app or `codex` command is running.
+The menu also includes "Sleep When T3 Threads Finish (Lid Closed)", described below, and an "Only While Codex Is Running" option. When enabled, Modafinil keeps sleep prevention requested but only applies it while a Codex app or `codex` command is running.
 
 ## Sleep timer and confirmed results
 
@@ -58,6 +58,27 @@ at 21:16:13. macOS returned to sleep and fully woke at 21:17. Keep-awake was
 restored and both test timers were cleared. Because power was connected during
 sleep, this validates the sleep path and recovery but is not an isolated proof
 of the scheduled wake source.
+
+## Sleep when T3 Code threads finish (Mac 0.7.0)
+
+Turn on **Sleep when T3 Code threads finish (lid closed)** in Settings or the right-click menu.
+While keep-awake is on, the lid is closed and no external display is connected, Modafinil
+checks [T3 Code](https://github.com/pingdotgg/t3code) every 15 seconds. When no thread has
+been working or waiting for 1 minute, it turns keep-awake off and puts the Mac to sleep,
+the same way an iPhone sleep request does (remote wake stays armed). Opening the lid turns
+keep-awake back on, so the next closed-lid agent session keeps running.
+
+- A thread counts as active while its latest run is `preparing`, `queued`, `starting`,
+  `running` or `waiting` (waiting for an answer or approval), the statuses T3 itself
+  treats as active. Delegated subagent threads count too.
+- The minute of grace covers a subagent finishing before its parent resumes and a queued
+  message starting the next turn.
+- If T3 Code is not running, nothing counts as working. If its state cannot be read
+  (for example after a T3 update changes its database), Modafinil does not sleep and
+  shows the reason.
+- State is read from `~/.t3/userdata/statev2.sqlite`, read-only, with one indexed query
+  (a few milliseconds), only while the lid is closed. Nothing is written to T3.
+- Scheduled T3 tasks cannot run while the Mac sleeps.
 
 ## Redesigned Mac window (Mac 0.6.0)
 

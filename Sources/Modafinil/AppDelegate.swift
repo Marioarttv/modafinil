@@ -2,6 +2,7 @@ import AppKit
 import notify
 import ModafinilShared
 import ModafinilRemoteProtocol
+import ModafinilT3
 import ServiceManagement
 import SwiftUI
 
@@ -61,6 +62,16 @@ final class AppDelegate: NSObject,
     private var scheduledWakeDate: Date?
     private var isWakeScheduleInFlight = false
     private static let scheduledWakeDefaultsKey = "companion.scheduledWakeAt"
+    private let t3ActivityReader = T3ActivityReader()
+    private var isT3SleepEnabled = UserDefaults.standard.bool(forKey: AppDelegate.t3SleepEnabledDefaultsKey)
+    private var t3SleepWatch = T3SleepWatch()
+    private var t3WatchTimer: Timer?
+    private var t3WatchActivity: NSObjectProtocol?
+    private var lastT3Activity: T3Activity?
+    private var lastT3ActivityAt: Date?
+    private var t3SleepAt: Date?
+    /// Labels the next helper sleep receipt, which the helper records as a generic request.
+    private var pendingSleepSource: (source: String, at: Date)?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         if let event = NSAppleEventManager.shared().currentAppleEvent,
@@ -105,6 +116,7 @@ final class AppDelegate: NSObject,
             object: nil
         )
 
+        lidMonitor.onLidStateChange = { [weak self] _ in self?.handleLidStateChange() }
         do {
             try lidMonitor.start()
         } catch {
@@ -131,6 +143,7 @@ final class AppDelegate: NSObject,
         if companionConfigurationStore.isWakeArmed {
             activateProvisionalWakeLease()
         }
+        restoreKeepAwakeAfterT3SleepIfLidOpen()
     }
 
     func popoverDidClose(_ notification: Notification) {
@@ -166,6 +179,8 @@ final class AppDelegate: NSObject,
         if let journalNotifyToken { notify_cancel(journalNotifyToken) }
         if let assertionNotifyToken { notify_cancel(assertionNotifyToken) }
         codexRuntimeTimer?.invalidate()
+        t3WatchTimer?.invalidate()
+        endT3WatchActivity()
         provisionalWakeLeaseTimer?.invalidate()
         scheduledWakeTimer?.invalidate()
         statusPopover.performClose(nil)
@@ -219,6 +234,7 @@ final class AppDelegate: NSObject,
         if !completeScheduledWakeIfDue() {
             activateProvisionalWakeLease()
         }
+        restoreKeepAwakeAfterT3SleepIfLidOpen()
         refreshHistoryWindow()
     }
 
@@ -227,7 +243,9 @@ final class AppDelegate: NSObject,
         let snapshot = historyRecorder.recordWake()
         companionServer?.ensureRunning()
         synchronizeSleepJournal()
+        t3SleepWatch.reset()
         defer {
+            restoreKeepAwakeAfterT3SleepIfLidOpen()
             refreshIcon()
             refreshHistoryWindow()
         }
@@ -249,6 +267,7 @@ final class AppDelegate: NSObject,
         let status = notify_register_dispatch(SleepJournalStore.changeNotification, &token, .main) { [weak self] _ in
             guard let self else { return }
             self.synchronizeSleepJournal()
+            self.restoreKeepAwakeAfterT3SleepIfLidOpen()
             self.refreshIcon()
         }
         if status == UInt32(NOTIFY_STATUS_OK) { journalNotifyToken = token }
@@ -313,6 +332,7 @@ final class AppDelegate: NSObject,
 
         cancelProvisionalWakeLease()
         companionConfigurationStore.isWakeArmed = false
+        isKeepAwakeSuspendedForT3Sleep = false
         isSleepPreventionRequested = nextState
         keepAwakeChangeSource = "Mac"
         refreshHelperStatus()
@@ -560,6 +580,7 @@ final class AppDelegate: NSObject,
     private func finishRestoringNormalSleepBehavior(completion: @escaping (Result<Void, Error>) -> Void) {
         cancelProvisionalWakeLease()
         companionConfigurationStore.isWakeArmed = false
+        isKeepAwakeSuspendedForT3Sleep = false
         refreshHelperStatus()
         let localSleepPreventionStatus = readLocalSleepPreventionStatus()
 
@@ -746,6 +767,8 @@ final class AppDelegate: NSObject,
 
     func uiToggleCodexLimit() { toggleCodexRuntimeLimit() }
 
+    func uiToggleT3Sleep() { toggleT3Sleep() }
+
     func uiToggleLoginItem() { toggleLoginItem() }
 
     func uiScheduleSleep(after seconds: Int) {
@@ -918,6 +941,7 @@ final class AppDelegate: NSObject,
             switch result {
             case .success:
                 self.companionConfigurationStore.isWakeArmed = true
+                self.isKeepAwakeSuspendedForT3Sleep = false
                 self.historyRecorder.note("Sleep timer set for \(Self.durationText(Double(seconds))) (\(source))")
                 completion(.success((self.makeRemoteState(), "Sleep timer saved on the Mac.")))
             case .failure(let error): completion(.failure(error))
@@ -973,7 +997,12 @@ final class AppDelegate: NSObject,
         guard previous?.id != attempt.id || previous?.phase != attempt.phase else { return }
         lastNotedAttempt = (attempt.id, attempt.phase)
         if previous?.id != attempt.id, attempt.attempts > 0 || attempt.phase == .pending {
-            let source = attempt.trigger == "timer" ? "sleep timer" : (attempt.trigger == "request" ? "iPhone" : "Modafinil")
+            var source = attempt.trigger == "timer" ? "sleep timer" : (attempt.trigger == "request" ? "iPhone" : "Modafinil")
+            if attempt.trigger == "request", let pending = pendingSleepSource,
+               abs(attempt.requestedAt.timeIntervalSince(pending.at)) < 120 {
+                source = pending.source
+            }
+            pendingSleepSource = nil
             historyRecorder.note("Sleep requested (\(source))", at: attempt.requestedAt)
         }
         switch attempt.phase {
@@ -1027,6 +1056,7 @@ final class AppDelegate: NSObject,
 
         companionConfigurationStore.isWakeArmed = false
         cancelProvisionalWakeLease()
+        isKeepAwakeSuspendedForT3Sleep = false
         isSleepPreventionRequested = true
 
         if isCodexRuntimeLimitEnabled {
@@ -1070,6 +1100,25 @@ final class AppDelegate: NSObject,
     private func performRemoteSleep(
         completion: @escaping (Result<(RemoteState, String), Error>) -> Void
     ) {
+        // An explicit sleep from the iPhone: keep-awake stays off afterwards.
+        isKeepAwakeSuspendedForT3Sleep = false
+        requestSystemSleep { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                completion(.success((
+                    self.makeRemoteState(),
+                    "Sleep request accepted. Check sleep history for confirmation or failure."
+                )))
+            case .failure(let error):
+                completion(.failure(error))
+            }
+        }
+    }
+
+    /// Turns keep-awake off and asks the helper to sleep the Mac now. Arms
+    /// remote wake recovery, like a sleep timer.
+    private func requestSystemSleep(completion: @escaping (Result<Void, Error>) -> Void) {
         guard !isToggleInFlight else {
             completion(.failure(
                 CompanionRemoteError("Modafinil is already updating the sleep setting.")
@@ -1107,10 +1156,7 @@ final class AppDelegate: NSObject,
                 self.isSleepPreventionEnabled = false
                 self.lidMonitor.setEnabled(false)
                 self.refreshIcon()
-                completion(.success((
-                    self.makeRemoteState(),
-                    "Sleep request accepted. Check sleep history for confirmation or failure."
-                )))
+                completion(.success(()))
             case .failure(let error):
                 self.companionConfigurationStore.isWakeArmed = false
                 self.isSleepPreventionRequested = previousRequestedState
@@ -1294,6 +1340,158 @@ final class AppDelegate: NSObject,
         reconcileSleepPreventionWithCurrentMode()
     }
 
+    // MARK: Sleep when T3 Code threads finish
+
+    @objc private func toggleT3Sleep() {
+        lastError = nil
+        isT3SleepEnabled.toggle()
+        UserDefaults.standard.set(isT3SleepEnabled, forKey: Self.t3SleepEnabledDefaultsKey)
+        if !isT3SleepEnabled { isKeepAwakeSuspendedForT3Sleep = false }
+        historyRecorder.note("Sleep when T3 Code finishes \(isT3SleepEnabled ? "on" : "off")")
+        lastT3ActivityAt = nil
+        refreshIcon()
+    }
+
+    /// Keep-awake that the user asked for and that is in effect. A wake-recovery
+    /// lease alone does not count: it ends by itself.
+    private var isKeepAwakeOnForT3Watch: Bool {
+        isSleepPreventionEnabled && isSleepPreventionRequested
+    }
+
+    /// Polls T3 every 15 s while the feature could apply. Each check reads the lid
+    /// state first; T3's database is read only while the lid is closed.
+    private func updateT3SleepMonitoring() {
+        let shouldPoll = isT3SleepEnabled && isKeepAwakeOnForT3Watch && !isQuitInProgress
+        if shouldPoll, t3WatchTimer == nil {
+            let timer = Timer(timeInterval: 15, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.evaluateT3Sleep() }
+            }
+            timer.tolerance = 3
+            t3WatchTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+            DispatchQueue.main.async { [weak self] in self?.evaluateT3Sleep() }
+        } else if !shouldPoll, let timer = t3WatchTimer {
+            timer.invalidate()
+            t3WatchTimer = nil
+            t3SleepWatch.reset()
+            t3SleepAt = nil
+            endT3WatchActivity()
+        }
+        // Catches a lid opened while an update was in flight. Rare: only after a T3 sleep.
+        if isKeepAwakeSuspendedForT3Sleep, !isToggleInFlight, lidMonitor.isLidClosed() == false {
+            DispatchQueue.main.async { [weak self] in self?.restoreKeepAwakeAfterT3SleepIfLidOpen() }
+        }
+    }
+
+    private func handleLidStateChange() {
+        evaluateT3Sleep()
+        restoreKeepAwakeAfterT3SleepIfLidOpen()
+    }
+
+    private func evaluateT3Sleep() {
+        guard !isToggleInFlight, !isQuitInProgress else { return }
+        let conditions = T3SleepWatch.Conditions(
+            isEnabled: isT3SleepEnabled,
+            isKeepAwakeOn: isKeepAwakeOnForT3Watch,
+            isLidClosed: lidMonitor.isLidClosed(),
+            hasExternalDisplay: LidMonitor.hasExternalDisplay()
+        )
+        let previousSleepAt = t3SleepAt
+        switch t3SleepWatch.evaluate(conditions, now: Date(), activity: readT3Activity) {
+        case .notWatching:
+            t3SleepAt = nil
+            endT3WatchActivity()
+        case .busy:
+            t3SleepAt = nil
+            beginT3WatchActivity()
+        case .waitingForGrace(let sleepAt):
+            t3SleepAt = sleepAt
+            beginT3WatchActivity()
+        case .sleepNow:
+            t3SleepAt = nil
+            t3SleepWatch.reset()
+            endT3WatchActivity()
+            performT3Sleep()
+            return
+        }
+        if previousSleepAt != t3SleepAt { refreshUI() }
+    }
+
+    private func readT3Activity() -> T3Activity {
+        let activity = t3ActivityReader.read()
+        if activity != lastT3Activity, isT3SleepEnabled {
+            if case .unavailable(let reason) = activity {
+                NSLog("Modafinil cannot read T3 Code state: \(reason)")
+            }
+        }
+        lastT3Activity = activity
+        lastT3ActivityAt = Date()
+        return activity
+    }
+
+    private func performT3Sleep() {
+        historyRecorder.note("T3 Code finished: sleeping with the lid closed")
+        pendingSleepSource = ("T3 Code finished", Date())
+        isKeepAwakeSuspendedForT3Sleep = true
+        requestSystemSleep { [weak self] result in
+            guard let self, case .failure(let error) = result else { return }
+            self.isKeepAwakeSuspendedForT3Sleep = false
+            self.pendingSleepSource = nil
+            self.lastError = "Could not sleep after T3 Code finished: \(error.localizedDescription)"
+            self.historyRecorder.note("Sleep after T3 Code finished failed: \(error.localizedDescription)")
+            self.refreshIcon()
+        }
+    }
+
+    /// After a T3 sleep, opening the lid turns keep-awake back on, so closing it
+    /// again keeps the next agent session running. Waits while the sleep request
+    /// is still being verified, so the helper's receipt cannot undo it.
+    private func restoreKeepAwakeAfterT3SleepIfLidOpen() {
+        guard isKeepAwakeSuspendedForT3Sleep, !isToggleInFlight, !isQuitInProgress,
+              lidMonitor.isLidClosed() == false else { return }
+        synchronizeSleepJournal()
+        guard sleepAttempt?.phase != .pending else { return }
+        isKeepAwakeSuspendedForT3Sleep = false
+        cancelProvisionalWakeLease()
+        companionConfigurationStore.isWakeArmed = false
+        isSleepPreventionRequested = true
+        keepAwakeChangeSource = "lid opened after T3 sleep"
+        reconcileSleepPreventionWithCurrentMode()
+    }
+
+    private var isKeepAwakeSuspendedForT3Sleep: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.t3SleepRestoreDefaultsKey) }
+        set {
+            if newValue { UserDefaults.standard.set(true, forKey: Self.t3SleepRestoreDefaultsKey) }
+            else { UserDefaults.standard.removeObject(forKey: Self.t3SleepRestoreDefaultsKey) }
+        }
+    }
+
+    /// Stops App Nap from stretching the 15 s checks while the lid is closed.
+    /// Does not prevent sleep and creates no power assertion.
+    private func beginT3WatchActivity() {
+        guard t3WatchActivity == nil else { return }
+        t3WatchActivity = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep,
+            reason: "Waiting for T3 Code threads to finish before sleeping"
+        )
+    }
+
+    private func endT3WatchActivity() {
+        guard let activity = t3WatchActivity else { return }
+        ProcessInfo.processInfo.endActivity(activity)
+        t3WatchActivity = nil
+    }
+
+    /// Fresh T3 state for a visible window, at most every 5 s.
+    private func currentT3ActivityForDisplay() -> T3Activity? {
+        guard isT3SleepEnabled else { return nil }
+        if let at = lastT3ActivityAt, Date().timeIntervalSince(at) < 5, let activity = lastT3Activity {
+            return activity
+        }
+        return readT3Activity()
+    }
+
     private func refreshHelperStatus() {
         helperStatus = helperInstaller.status
     }
@@ -1349,6 +1547,7 @@ final class AppDelegate: NSObject,
     }
 
     private func refreshIcon() {
+        updateT3SleepMonitoring()
         let symbolName = isSleepPreventionEnabled ? "eye.fill" : Self.inactiveSymbolName
         let configuration = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
         let accessibilityDescription = if isSleepPreventionEnabled {
@@ -1431,6 +1630,15 @@ final class AppDelegate: NSObject,
         codexLimitItem.state = isCodexRuntimeLimitEnabled ? .on : .off
         menu.addItem(codexLimitItem)
 
+        let t3SleepItem = NSMenuItem(
+            title: "Sleep When T3 Threads Finish (Lid Closed)",
+            action: #selector(toggleT3Sleep),
+            keyEquivalent: ""
+        )
+        t3SleepItem.target = self
+        t3SleepItem.state = isT3SleepEnabled ? .on : .off
+        menu.addItem(t3SleepItem)
+
         let loginItem = NSMenuItem(title: "Open at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
         loginItem.target = self
         loginItem.state = loginItems.isEnabled ? .on : .off
@@ -1456,6 +1664,12 @@ final class AppDelegate: NSObject,
             )
             codexStatusItem.isEnabled = false
             menu.addItem(codexStatusItem)
+        }
+
+        if let activity = currentT3ActivityForDisplay() {
+            let t3StatusItem = NSMenuItem(title: activity.summary, action: nil, keyEquivalent: "")
+            t3StatusItem.isEnabled = false
+            menu.addItem(t3StatusItem)
         }
 
         let settingsItem = NSMenuItem(
@@ -1501,6 +1715,15 @@ final class AppDelegate: NSObject,
         snapshot.isBusy = isToggleInFlight || isQuitInProgress
         snapshot.isCodexLimitEnabled = isCodexRuntimeLimitEnabled
         snapshot.isCodexRunning = isCodexRunning
+        snapshot.isT3SleepEnabled = isT3SleepEnabled
+        if let activity = currentT3ActivityForDisplay() {
+            snapshot.t3Status = activity.summary
+            if case .busy(let threads) = activity {
+                snapshot.t3Threads = threads.map { T3ThreadRow(title: $0.title, isWaiting: $0.isWaiting) }
+            }
+        }
+        snapshot.t3SleepAt = t3SleepAt
+        snapshot.isT3RestorePending = isKeepAwakeSuspendedForT3Sleep
         snapshot.helperStatus = helperStatusDescription
         snapshot.isHelperEnabled = helperStatus == .enabled
         snapshot.scheduledSleepDate = scheduledSleepDate
@@ -1553,6 +1776,10 @@ final class AppDelegate: NSObject,
             return "Codex is running, so Modafinil is keeping your Mac awake. Sleep prevention will turn off when Codex stops."
         }
 
+        if isSleepPreventionEnabled, isT3SleepEnabled {
+            return "Modafinil is keeping your Mac awake. With the lid closed, it sleeps once T3 Code threads finish."
+        }
+
         if isSleepPreventionEnabled {
             return "Modafinil is keeping your Mac awake until you turn it off or quit the app."
         }
@@ -1566,6 +1793,9 @@ final class AppDelegate: NSObject,
         }
 
         if let attempt = sleepAttempt, [.pending, .failed].contains(attempt.phase) { return attempt.detail }
+        if isKeepAwakeSuspendedForT3Sleep {
+            return "The Mac slept after T3 Code finished. Keep-awake turns back on when you open the lid."
+        }
         return "Modafinil is not preventing sleep. This does not mean the Mac is currently asleep."
     }
 
@@ -1626,4 +1856,6 @@ final class AppDelegate: NSObject,
     }()
 
     private static let codexRuntimeLimitEnabledDefaultsKey = "CodexRuntimeLimitEnabled"
+    private static let t3SleepEnabledDefaultsKey = "T3SleepWhenFinishedEnabled"
+    private static let t3SleepRestoreDefaultsKey = "T3SleepRestoreKeepAwake"
 }

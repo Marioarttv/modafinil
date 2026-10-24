@@ -40,6 +40,12 @@ struct AppSnapshot {
     var isBusy = false
     var isCodexLimitEnabled = false
     var isCodexRunning = false
+    var isT3SleepEnabled = false
+    /// One line about T3 Code, e.g. "T3 threads: 2 working". Nil when the feature is off.
+    var t3Status: String?
+    var t3Threads: [T3ThreadRow] = []
+    var t3SleepAt: Date?
+    var isT3RestorePending = false
     var helperStatus = ""
     var isHelperEnabled = false
     var scheduledSleepDate: Date?
@@ -59,10 +65,16 @@ struct AppSnapshot {
     var version = ""
 }
 
+struct T3ThreadRow: Hashable {
+    var title: String
+    var isWaiting: Bool
+}
+
 @MainActor
 protocol AppUIActions: AnyObject {
     func uiToggleKeepAwake()
     func uiToggleCodexLimit()
+    func uiToggleT3Sleep()
     func uiToggleLoginItem()
     func uiScheduleSleep(after seconds: Int)
     func uiCancelSleepTimer()

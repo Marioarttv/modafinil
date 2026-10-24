@@ -16,6 +16,10 @@ let package = Package(
             linkerSettings: [.linkedFramework("IOKit")]
         ),
         .target(
+            name: "ModafinilT3",
+            linkerSettings: [.linkedLibrary("sqlite3")]
+        ),
+        .target(
             name: "ModafinilRemoteProtocol",
             linkerSettings: [
                 .linkedFramework("Security")
@@ -23,7 +27,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "Modafinil",
-            dependencies: ["ModafinilShared", "ModafinilRemoteProtocol"],
+            dependencies: ["ModafinilShared", "ModafinilRemoteProtocol", "ModafinilT3"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("CoreImage"),
@@ -42,7 +46,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ModafinilRemoteProtocolTests",
-            dependencies: ["ModafinilRemoteProtocol", "ModafinilShared"]
+            dependencies: ["ModafinilRemoteProtocol", "ModafinilShared", "ModafinilT3"]
         )
     ]
 )
