@@ -889,6 +889,15 @@ final class AppDelegate: NSObject,
             }
             let history = historyRecorder.remoteHistory(from: range.from, to: range.to)
             completion(.success((makeRemoteState(history: history), "History loaded.")))
+        case .setT3Sleep:
+            guard let enabled = RemoteT3Sleep.parseArgument(argument) else {
+                completion(.failure(CompanionRemoteError("The T3 sleep setting is invalid.")))
+                return
+            }
+            setT3SleepEnabled(enabled, source: "iPhone")
+            completion(.success((makeRemoteState(), enabled
+                ? "The Mac will sleep with the lid closed once T3 Code threads finish."
+                : "Sleep when T3 Code finishes is off.")))
         case .keepAwake:
             performRemoteKeepAwake(completion: completion)
         case .sleep:
@@ -1194,8 +1203,24 @@ final class AppDelegate: NSObject,
                 RemoteSleepBlocker(effect: $0.effect.rawValue, name: String($0.processName.prefix(40)),
                                    detail: $0.details.first.map { String($0.prefix(60)) })
             },
-            history: history
+            history: history,
+            t3Sleep: history != nil ? nil : makeRemoteT3Sleep()
         )
+    }
+
+    private func makeRemoteT3Sleep() -> RemoteT3Sleep {
+        guard let activity = currentT3ActivityForDisplay() else {
+            return RemoteT3Sleep(enabled: false, summary: "Off", restorePending: isKeepAwakeSuspendedForT3Sleep)
+        }
+        var working = 0, waiting = 0
+        if case .busy(let threads) = activity {
+            waiting = threads.filter(\.isWaiting).count
+            working = threads.count - waiting
+        }
+        return RemoteT3Sleep(enabled: true, summary: String(activity.summary.prefix(120)),
+                             working: working, waiting: waiting,
+                             sleepAt: t3SleepAt.map { Int64($0.timeIntervalSince1970) },
+                             restorePending: isKeepAwakeSuspendedForT3Sleep)
     }
 
     private func setScheduledWake(
@@ -1344,10 +1369,15 @@ final class AppDelegate: NSObject,
 
     @objc private func toggleT3Sleep() {
         lastError = nil
-        isT3SleepEnabled.toggle()
-        UserDefaults.standard.set(isT3SleepEnabled, forKey: Self.t3SleepEnabledDefaultsKey)
-        if !isT3SleepEnabled { isKeepAwakeSuspendedForT3Sleep = false }
-        historyRecorder.note("Sleep when T3 Code finishes \(isT3SleepEnabled ? "on" : "off")")
+        setT3SleepEnabled(!isT3SleepEnabled, source: "Mac")
+    }
+
+    private func setT3SleepEnabled(_ enabled: Bool, source: String) {
+        guard enabled != isT3SleepEnabled else { return }
+        isT3SleepEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.t3SleepEnabledDefaultsKey)
+        if !enabled { isKeepAwakeSuspendedForT3Sleep = false }
+        historyRecorder.note("Sleep when T3 Code finishes \(enabled ? "on" : "off") (\(source))")
         lastT3ActivityAt = nil
         refreshIcon()
     }

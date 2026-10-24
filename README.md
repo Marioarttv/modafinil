@@ -80,6 +80,9 @@ keep-awake back on, so the next closed-lid agent session keeps running.
 - State is read from `~/.t3/userdata/statev2.sqlite`, read-only, with one indexed query
   (a few milliseconds), only while the lid is closed. Nothing is written to T3.
 - Scheduled T3 tasks cannot run while the Mac sleeps.
+- Mac 0.8.0 / Companion 1.7 (protocol v6): the iPhone shows the setting with the live T3
+  status or countdown and can turn it on or off. Older phones and Macs keep working; an
+  older Mac answers with v5 or v4 and the phone asks for a Mac update for this setting.
 
 ## Redesigned Mac window (Mac 0.6.0)
 
