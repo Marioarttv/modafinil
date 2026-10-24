@@ -13,6 +13,35 @@ public enum RemoteCommand: String, Codable, Sendable {
     case wake
     /// Protocol v5: argument "<from>-<to>" in Unix seconds.
     case history
+    /// Protocol v6: argument "1" turns "Sleep when T3 Code threads finish" on, "0" off.
+    case setT3Sleep
+}
+
+/// The Mac's "Sleep when T3 Code threads finish (lid closed)" setting and what T3 is doing.
+public struct RemoteT3Sleep: Codable, Equatable, Sendable {
+    public let enabled: Bool
+    /// One line, e.g. "T3 threads: 2 working, 1 waiting" or "T3 Code is not running".
+    public let summary: String
+    public let working: Int
+    public let waiting: Int
+    /// Set while the lid is closed and T3 has finished: the Mac sleeps at this time.
+    public let sleepAt: Int64?
+    /// The Mac slept after T3 finished; keep-awake returns when the lid opens.
+    public let restorePending: Bool
+
+    public init(enabled: Bool, summary: String, working: Int = 0, waiting: Int = 0,
+                sleepAt: Int64? = nil, restorePending: Bool = false) {
+        self.enabled = enabled; self.summary = summary; self.working = working
+        self.waiting = waiting; self.sleepAt = sleepAt; self.restorePending = restorePending
+    }
+
+    public static func parseArgument(_ argument: String) -> Bool? {
+        switch argument {
+        case "1": return true
+        case "0": return false
+        default: return nil
+        }
+    }
 }
 
 /// One stretch of the Mac's power state. Short keys keep pages small.
@@ -132,6 +161,8 @@ public struct RemoteState: Codable, Equatable, Sendable {
     public let wakeTargetMACs: String?
     public let blockers: [RemoteSleepBlocker]?
     public let history: RemoteHistory?
+    /// Protocol v6.
+    public let t3Sleep: RemoteT3Sleep?
 
     public init(
         awakeRequested: Bool,
@@ -142,7 +173,8 @@ public struct RemoteState: Codable, Equatable, Sendable {
         sleepAttempt: RemoteSleepAttempt? = nil,
         wakeTargetMACs: String? = nil,
         blockers: [RemoteSleepBlocker]? = nil,
-        history: RemoteHistory? = nil
+        history: RemoteHistory? = nil,
+        t3Sleep: RemoteT3Sleep? = nil
     ) {
         self.awakeRequested = awakeRequested
         self.sleepPreventionEffective = sleepPreventionEffective
@@ -153,6 +185,7 @@ public struct RemoteState: Codable, Equatable, Sendable {
         self.wakeTargetMACs = wakeTargetMACs
         self.blockers = blockers
         self.history = history
+        self.t3Sleep = t3Sleep
     }
 }
 
@@ -163,7 +196,8 @@ public struct RemoteRequest: Codable, Equatable, Sendable {
     public static let sleepTrackingVersion = 3
     public static let wakeRecoveryVersion = 4
     public static let sleepHistoryVersion = 5
-    public static let supportedVersions: Set<Int> = [1, 2, 3, 4, 5]
+    public static let t3SleepVersion = 6
+    public static let supportedVersions: Set<Int> = [1, 2, 3, 4, 5, 6]
 
     public let version: Int
     public let requestID: String
@@ -248,7 +282,8 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
     public static let sleepTrackingVersion = 3
     public static let wakeRecoveryVersion = 4
     public static let sleepHistoryVersion = 5
-    public static let supportedVersions: Set<Int> = [1, 2, 3, 4, 5]
+    public static let t3SleepVersion = 6
+    public static let supportedVersions: Set<Int> = [1, 2, 3, 4, 5, 6]
 
     public let version: Int
     public let requestID: String
@@ -294,7 +329,8 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
                         sleepAttempt: version >= 3 ? $0.sleepAttempt : nil,
                         wakeTargetMACs: version >= 4 ? $0.wakeTargetMACs : nil,
                         blockers: version >= 5 ? $0.blockers : nil,
-                        history: version >= 5 ? $0.history : nil)
+                        history: version >= 5 ? $0.history : nil,
+                        t3Sleep: version >= 6 ? $0.t3Sleep : nil)
         }
         let unsigned = Self(
             version: version,
@@ -363,6 +399,7 @@ public struct RemoteResponse: Codable, Equatable, Sendable {
             (version >= Self.sleepTrackingVersion || state?.sleepAttempt == nil) &&
             (version >= Self.wakeRecoveryVersion || state?.wakeTargetMACs == nil) &&
             (version >= Self.sleepHistoryVersion || (state?.blockers == nil && state?.history == nil)) &&
+            (version >= Self.t3SleepVersion || state?.t3Sleep == nil) &&
             RemoteAuthentication.isValid(
                 signature: signature,
                 payload: canonicalPayload,
@@ -427,7 +464,8 @@ public final class RemoteRequestVerifier: @unchecked Sendable {
     ) throws {
         guard RemoteRequest.supportedVersions.contains(request.version),
               (request.version >= 2 || ![RemoteCommand.scheduleWake, .cancelScheduledWake].contains(request.command)),
-              (request.version >= RemoteRequest.sleepHistoryVersion || request.command != .history) else {
+              (request.version >= RemoteRequest.sleepHistoryVersion || request.command != .history),
+              (request.version >= RemoteRequest.t3SleepVersion || request.command != .setT3Sleep) else {
             throw VerificationError.unsupportedVersion
         }
         guard UUID(uuidString: request.requestID) != nil else {
