@@ -88,12 +88,17 @@ keep-awake back on, so the next closed-lid agent session keeps running.
 - A thread counts as active while its latest run is `preparing`, `queued`, `starting`,
   `running` or `waiting` (waiting for an answer or approval), the statuses T3 itself
   treats as active. Delegated subagent threads count too.
+- Since Mac 0.9.1 a thread also counts while it waits on background work after its turn
+  has ended, as T3 shows it: a background command, monitor or subagent the agent started
+  (for example a long build it will check on), or a tool call still running. These threads
+  are labelled **Background**. Pull request watches do not count: they wait on other
+  people and can last for days.
 - The minute of grace covers a subagent finishing before its parent resumes and a queued
   message starting the next turn.
 - If T3 Code is not running, nothing counts as working. If its state cannot be read
   (for example after a T3 update changes its database), Modafinil does not sleep and
   shows the reason.
-- State is read from `~/.t3/userdata/statev2.sqlite`, read-only, with one indexed query
+- State is read from `~/.t3/userdata/statev2.sqlite`, read-only, with two small queries
   (a few milliseconds), only while the lid is closed. Nothing is written to T3.
 - Scheduled T3 tasks cannot run while the Mac sleeps.
 - Mac 0.8.0 / Companion 1.7 (protocol v6): the iPhone shows the setting with the live T3

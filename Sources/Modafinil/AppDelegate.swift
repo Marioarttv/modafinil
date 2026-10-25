@@ -1861,7 +1861,7 @@ final class AppDelegate: NSObject,
         if let activity = currentT3ActivityForDisplay() {
             snapshot.t3Status = activity.summary
             if case .busy(let threads) = activity {
-                snapshot.t3Threads = threads.map { T3ThreadRow(title: $0.title, isWaiting: $0.isWaiting) }
+                snapshot.t3Threads = threads.map { T3ThreadRow(title: $0.title, isWaiting: $0.isWaiting, isInBackground: $0.isInBackground) }
             }
         }
         snapshot.t3SleepAt = t3SleepAt

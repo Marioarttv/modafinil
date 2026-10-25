@@ -79,6 +79,8 @@ struct AppChoice: Hashable {
 struct T3ThreadRow: Hashable {
     var title: String
     var isWaiting: Bool
+    /// The turn has ended but background work it started is still running.
+    var isInBackground = false
 }
 
 @MainActor
