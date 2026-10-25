@@ -22,26 +22,72 @@ final class T3ActivityReaderTests: XCTestCase {
 
     func testDeadServerMeansNotRunningEvenWithStaleRuns() throws {
         try writeRuntime(pid: 4242)
-        try makeDatabase(runs: [("a", "Stale", "running", nil)])
+        _ = try makeDatabase(runs: [("a", "Stale", "running", nil)])
         XCTAssertEqual(reader(alive: false).read(), .notRunning)
     }
 
     func testFinishedRunsAreIdle() throws {
         try writeRuntime(pid: 4242)
-        try makeDatabase(runs: [("a", "Done", "completed", nil), ("b", "Broke", "failed", nil),
+        _ = try makeDatabase(runs: [("a", "Done", "completed", nil), ("b", "Broke", "failed", nil),
                                 ("c", "Stopped", "interrupted", nil), ("d", "Rolled", "rolled_back", nil)])
         XCTAssertEqual(reader(alive: true).read(), .idle)
     }
 
     func testWorkingAndWaitingThreadsAreBusy() throws {
         try writeRuntime(pid: 4242)
-        try makeDatabase(runs: [("a", "Build", "running", nil), ("b", "Ask", "waiting", nil),
+        _ = try makeDatabase(runs: [("a", "Build", "running", nil), ("b", "Ask", "waiting", nil),
                                 ("c", "Old", "completed", nil), ("d", "Next", "queued", nil),
                                 ("e", "Gone", "running", "2026-10-01T00:00:00Z")])
         guard case .busy(let threads) = reader(alive: true).read() else { return XCTFail("expected busy") }
         XCTAssertEqual(Set(threads.map(\.title)), ["Build", "Ask", "Next"])
         XCTAssertEqual(threads.filter(\.isWaiting).map(\.title), ["Ask"])
         XCTAssertEqual(T3Activity.busy(threads).summary, "T3 threads: 2 working, 1 waiting")
+    }
+
+    func testBackgroundWorkAfterTheTurnEndedKeepsTheThreadBusy() throws {
+        try writeRuntime(pid: 4242)
+        let db = try makeDatabase(runs: [("a", "Movie", "completed", nil), ("b", "Done", "completed", nil),
+                                         ("c", "Gone", "completed", "2026-10-01T00:00:00Z")],
+                                  activeProviderThread: ["a": "pt-a2"])
+        try addProviderThread(db, id: "pt-a2", thread: "a", tasks: #"[{"taskId":"bub","kind":"command"}]"#)
+        try addProviderThread(db, id: "pt-b", thread: "b", tasks: "[]")
+        try addProviderThread(db, id: "pt-c", thread: "c", tasks: #"[{"taskId":"x","kind":"monitor"}]"#)
+        guard case .busy(let threads) = reader(alive: true).read() else { return XCTFail("expected busy") }
+        XCTAssertEqual(threads, [T3ActiveThread(title: "Movie", status: "background")])
+        XCTAssertTrue(threads[0].isInBackground)
+        XCTAssertFalse(threads[0].isWaiting)
+        XCTAssertEqual(T3Activity.busy(threads).summary, "T3 threads: 1 working")
+    }
+
+    func testOnlyTheActiveProviderThreadsTasksCount() throws {
+        try writeRuntime(pid: 4242)
+        let db = try makeDatabase(runs: [("a", "Handed off", "completed", nil)],
+                                  activeProviderThread: ["a": "pt-new"])
+        try addProviderThread(db, id: "pt-old", thread: "a", tasks: #"[{"taskId":"stale","kind":"command"}]"#)
+        try addProviderThread(db, id: "pt-new", thread: "a", tasks: "[]")
+        XCTAssertEqual(reader(alive: true).read(), .idle)
+    }
+
+    func testRunningToolItemsCountButPersistentToolsAndRolledBackRunsDoNot() throws {
+        try writeRuntime(pid: 4242)
+        let db = try makeDatabase(runs: [("a", "Shell", "completed", nil), ("b", "Server", "completed", nil),
+                                         ("c", "Undone", "rolled_back", nil), ("d", "Agent", "interrupted", nil),
+                                         ("e", "Edit", "completed", nil)])
+        try addItem(db, thread: "a", type: "command_execution", status: "running")
+        try addItem(db, thread: "b", type: "dynamic_tool", status: "running", input: #"{"persistent":true}"#)
+        try addItem(db, thread: "c", type: "command_execution", status: "running")
+        try addItem(db, thread: "d", type: "subagent", status: "pending")
+        try addItem(db, thread: "e", type: "file_change", status: "running")
+        guard case .busy(let threads) = reader(alive: true).read() else { return XCTFail("expected busy") }
+        XCTAssertEqual(Set(threads.map(\.title)), ["Shell", "Agent"])
+    }
+
+    func testAThreadIsListedOnceWhenItsRunIsActive() throws {
+        try writeRuntime(pid: 4242)
+        let db = try makeDatabase(runs: [("a", "Build", "running", nil)])
+        try addProviderThread(db, id: "pt-a", thread: "a", tasks: #"[{"taskId":"bub","kind":"command"}]"#)
+        try addItem(db, thread: "a", type: "command_execution", status: "running")
+        XCTAssertEqual(reader(alive: true).read(), .busy([T3ActiveThread(title: "Build", status: "running")]))
     }
 
     func testUnexpectedSchemaIsUnavailableAndNeverFinished() throws {
@@ -91,9 +137,14 @@ final class T3ActivityReaderTests: XCTestCase {
     }
 
     /// Mirrors the columns of T3's tables that the reader depends on, in WAL mode like T3.
-    private func makeDatabase(runs: [(thread: String, title: String, status: String, deletedAt: String?)]) throws {
+    /// The returned connection stays open for the test's lifetime.
+    @discardableResult
+    private func makeDatabase(
+        runs: [(thread: String, title: String, status: String, deletedAt: String?)],
+        activeProviderThread: [String: String] = [:]
+    ) throws -> OpaquePointer {
         let db = try open()
-        defer { sqlite3_close(db) }
+        addTeardownBlock { sqlite3_close(db) }
         try exec(db, """
             PRAGMA journal_mode=WAL;
             CREATE TABLE orchestration_v2_projection_threads (
@@ -104,16 +155,49 @@ final class T3ActivityReaderTests: XCTestCase {
               run_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, ordinal INTEGER NOT NULL,
               provider TEXT NOT NULL, status TEXT NOT NULL, requested_at TEXT NOT NULL,
               completed_at TEXT, payload_json TEXT NOT NULL);
+            CREATE TABLE orchestration_v2_projection_provider_threads (
+              provider_thread_id TEXT PRIMARY KEY, thread_id TEXT, owner_node_id TEXT,
+              provider TEXT NOT NULL, provider_session_id TEXT, status TEXT NOT NULL,
+              first_run_ordinal INTEGER, last_run_ordinal INTEGER, updated_at TEXT NOT NULL,
+              payload_json TEXT NOT NULL);
+            CREATE TABLE orchestration_v2_projection_turn_items (
+              turn_item_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, run_id TEXT, node_id TEXT,
+              provider_thread_id TEXT, provider_turn_id TEXT, parent_item_id TEXT,
+              ordinal INTEGER NOT NULL, type TEXT NOT NULL, status TEXT NOT NULL,
+              updated_at TEXT NOT NULL, payload_json TEXT NOT NULL);
             """)
         for (index, run) in runs.enumerated() {
             let deleted = run.deletedAt.map { "'\($0)'" } ?? "NULL"
+            let payload = activeProviderThread[run.thread].map { #"{"activeProviderThreadId":"\#($0)"}"# }
+                ?? #"{"activeProviderThreadId":null}"#
             try exec(db, """
                 INSERT INTO orchestration_v2_projection_threads VALUES
-                  ('\(run.thread)', 'p', '\(run.title)', 'x', 'x', NULL, \(deleted), '{}');
+                  ('\(run.thread)', 'p', '\(run.title)', 'x', 'x', NULL, \(deleted), '\(payload)');
                 INSERT INTO orchestration_v2_projection_runs VALUES
                   ('run-\(run.thread)', '\(run.thread)', 1, 'codex', '\(run.status)', '2026-10-24T10:0\(index):00Z', NULL, '{}');
                 """)
         }
+        return db
+    }
+
+    private func addProviderThread(_ db: OpaquePointer, id: String, thread: String, tasks: String) throws {
+        try exec(db, """
+            INSERT INTO orchestration_v2_projection_provider_threads VALUES
+              ('\(id)', '\(thread)', NULL, 'claudeAgent', NULL, 'idle', 1, 1, 'x',
+               '{"id":"\(id)","appThreadId":"\(thread)","pendingBackgroundTasks":\(tasks)}');
+            """)
+    }
+
+    private var itemCount = 0
+
+    private func addItem(_ db: OpaquePointer, thread: String, type: String, status: String,
+                         input: String = #""ls""#) throws {
+        itemCount += 1
+        try exec(db, """
+            INSERT INTO orchestration_v2_projection_turn_items VALUES
+              ('item-\(itemCount)', '\(thread)', 'run-\(thread)', NULL, NULL, NULL, NULL, \(itemCount),
+               '\(type)', '\(status)', 'x', '{"type":"\(type)","input":\(input)}');
+            """)
     }
 }
 

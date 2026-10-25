@@ -138,8 +138,8 @@ struct T3SleepCard: View {
                 HStack {
                     Text(thread.title).lineLimit(1)
                     Spacer()
-                    Pill(text: thread.isWaiting ? "Waiting" : "Working",
-                         color: thread.isWaiting ? .orange : .green)
+                    Pill(text: thread.isWaiting ? "Waiting" : thread.isInBackground ? "Background" : "Working",
+                         color: thread.isWaiting ? .orange : thread.isInBackground ? .teal : .green)
                 }
                 .font(.callout)
             }

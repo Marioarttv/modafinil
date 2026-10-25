@@ -5,7 +5,8 @@ import SQLite3
 /// A T3 Code thread whose latest run has not finished.
 public struct T3ActiveThread: Equatable {
     public var title: String
-    /// T3's run status: preparing, queued, starting, running or waiting.
+    /// T3's run status (preparing, queued, starting, running or waiting), or
+    /// `background` when the turn has ended but its background work is still going.
     public var status: String
 
     public init(title: String, status: String) {
@@ -15,6 +16,10 @@ public struct T3ActiveThread: Equatable {
 
     /// "waiting" means T3 needs an answer or approval; everything else is work in progress.
     public var isWaiting: Bool { status == "waiting" }
+
+    /// The agent ended its turn and waits for a background command, monitor or
+    /// subagent to report back. Counts as working.
+    public var isInBackground: Bool { status == T3ActivityReader.backgroundStatus }
 }
 
 public enum T3Activity: Equatable {
@@ -52,11 +57,16 @@ public enum T3Activity: Equatable {
 /// Reads T3 Code's thread state from its local database, read-only.
 ///
 /// T3 stores each thread's runs in `orchestration_v2_projection_runs`; a thread is
-/// active while its run is in one of T3's own active statuses. One indexed query
-/// takes a few milliseconds, so it is cheap enough to poll while the lid is closed.
+/// active while its run is in one of T3's own active statuses. A thread whose turn
+/// has ended is still active while it waits on background work, as T3 shows it:
+/// a background command, monitor or subagent the agent started, or a tool call
+/// still running. Both queries take a few milliseconds, so they are cheap enough
+/// to poll while the lid is closed.
 public struct T3ActivityReader {
     /// T3's `activeRunStatuses`: a thread in one of these is working or waiting.
     public static let activeRunStatuses = ["preparing", "queued", "starting", "running", "waiting"]
+    /// The status reported for a thread that waits on background work.
+    public static let backgroundStatus = "background"
 
     public var userDataDirectory: URL
     /// Whether the process recorded in `server-runtime.json` is a live T3 server.
@@ -104,31 +114,79 @@ public struct T3ActivityReader {
         defer { sqlite3_close(db) }
         sqlite3_busy_timeout(db, 2000)
 
+        var threads: [T3ActiveThread] = []
+        var seen = Set<String>()
+        for sql in [activeRunsSQL, backgroundWorkSQL] {
+            for row in try rows(db, sql) where seen.insert(row.threadID).inserted {
+                threads.append(T3ActiveThread(title: row.title, status: row.status))
+            }
+        }
+        return threads
+    }
+
+    private static var activeRunsSQL: String {
         let statuses = activeRunStatuses.map { "'\($0)'" }.joined(separator: ",")
-        let sql = """
-            SELECT COALESCE(t.title, 'Untitled thread'), r.status
+        return """
+            SELECT r.thread_id, COALESCE(t.title, 'Untitled thread'), r.status
             FROM orchestration_v2_projection_runs r
             LEFT JOIN orchestration_v2_projection_threads t ON t.thread_id = r.thread_id
             WHERE r.status IN (\(statuses)) AND t.deleted_at IS NULL
             GROUP BY r.thread_id
             ORDER BY r.requested_at
             """
+    }
+
+    /// Threads whose latest run has settled but that still wait on background work.
+    /// Mirrors T3's own `derivePendingBackgroundWork`: the background tasks recorded
+    /// on the thread's active provider thread, and command, tool and subagent items
+    /// still pending (minus persistent tools and rolled-back runs). Pull request
+    /// watches are left out: they wait on other people and can last for days.
+    private static let backgroundWorkSQL = """
+        WITH candidates(thread_id, provider_thread_id) AS MATERIALIZED (
+          SELECT COALESCE(NULLIF(p.thread_id, ''), json_extract(p.payload_json, '$.appThreadId')),
+                 p.provider_thread_id
+          FROM orchestration_v2_projection_provider_threads p
+          WHERE json_array_length(p.payload_json, '$.pendingBackgroundTasks') > 0
+          UNION ALL
+          SELECT i.thread_id, NULL
+          FROM orchestration_v2_projection_turn_items i
+          WHERE i.type IN ('command_execution', 'dynamic_tool', 'subagent')
+            AND i.status NOT IN ('completed', 'interrupted', 'failed', 'cancelled')
+            AND i.status IN ('pending', 'running', 'waiting')
+            AND NOT (i.type = 'dynamic_tool' AND json_extract(i.payload_json, '$.input.persistent') = 1)
+            AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_runs rb
+                            WHERE rb.run_id = i.run_id AND rb.status = 'rolled_back')
+        )
+        SELECT t.thread_id, COALESCE(t.title, 'Untitled thread'), '\(backgroundStatus)'
+        FROM orchestration_v2_projection_threads t
+        WHERE t.deleted_at IS NULL
+          AND t.thread_id IN (SELECT thread_id FROM candidates)
+          AND EXISTS (SELECT 1 FROM candidates c WHERE c.thread_id = t.thread_id
+                      AND (c.provider_thread_id IS NULL
+                           OR json_extract(t.payload_json, '$.activeProviderThreadId') IS NULL
+                           OR c.provider_thread_id = json_extract(t.payload_json, '$.activeProviderThreadId')))
+          AND (SELECT r.status FROM orchestration_v2_projection_runs r
+               WHERE r.thread_id = t.thread_id AND r.status <> 'queued'
+               ORDER BY r.ordinal DESC LIMIT 1) IN ('cancelled', 'completed', 'failed', 'interrupted', 'waiting')
+        ORDER BY t.updated_at
+        """
+
+    private static func rows(_ db: OpaquePointer, _ sql: String) throws -> [(threadID: String, title: String, status: String)] {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
             throw ReadError(String(cString: sqlite3_errmsg(db)))
         }
         defer { sqlite3_finalize(statement) }
 
-        var threads: [T3ActiveThread] = []
+        var result: [(threadID: String, title: String, status: String)] = []
         while true {
             let step = sqlite3_step(statement)
             if step == SQLITE_DONE { break }
             guard step == SQLITE_ROW else { throw ReadError(String(cString: sqlite3_errmsg(db))) }
-            let title = sqlite3_column_text(statement, 0).map { String(cString: $0) } ?? "Untitled thread"
-            let status = sqlite3_column_text(statement, 1).map { String(cString: $0) } ?? "running"
-            threads.append(T3ActiveThread(title: title, status: status))
+            func text(_ column: Int32) -> String? { sqlite3_column_text(statement, column).map { String(cString: $0) } }
+            result.append((text(0) ?? "", text(1) ?? "Untitled thread", text(2) ?? "running"))
         }
-        return threads
+        return result
     }
 
     /// True for a live process whose executable looks like a T3 Code server
