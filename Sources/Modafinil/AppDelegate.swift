@@ -1099,9 +1099,11 @@ final class AppDelegate: NSObject,
                 // Without this, a closed-lid Mac with T3 already finished would be
                 // put back to sleep by "Sleep when T3 finishes" a minute after the
                 // iPhone woke it.
-                self.t3SleepWatch.waitForNewActivity()
-                self.t3SleepAt = nil
-                if self.isT3SleepEnabled {
+                // Only a closed-lid wake with the feature on needs the wait; a wait
+                // left over from an open-lid wake would block the rule later.
+                if self.isT3SleepEnabled, self.lidMonitor.isLidClosed() != false {
+                    self.t3SleepWatch.waitForNewActivity()
+                    self.t3SleepAt = nil
                     self.historyRecorder.note("Sleep when T3 finishes: waiting for a T3 thread to start (\(source))")
                 }
                 completion(.success((
@@ -1492,6 +1494,8 @@ final class AppDelegate: NSObject,
     private func setT3SleepEnabled(_ enabled: Bool, source: String) {
         guard enabled != isT3SleepEnabled else { return }
         isT3SleepEnabled = enabled
+        // Changing the setting starts the rule fresh.
+        t3SleepWatch.clearWaitForNewActivity()
         UserDefaults.standard.set(enabled, forKey: Self.t3SleepEnabledDefaultsKey)
         if !enabled { isKeepAwakeSuspendedForT3Sleep = false }
         historyRecorder.note("Sleep when T3 Code finishes \(enabled ? "on" : "off") (\(source))")
