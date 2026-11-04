@@ -170,11 +170,10 @@ final class RemoteMacsController: ObservableObject {
     func sleepNow(_ id: String) async {
         await command(id, .sleep, working: "Putting to sleep…")
         guard let attempt = mac(id)?.sleepAttempt, attempt.phase == .pending else { return }
-        // One check once the Mac's sleep verification has finished; it is then
-        // asleep (no answer) or reports why it could not sleep.
-        try? await Task.sleep(for: .seconds(35))
-        guard mac(id)?.phase == .sleepRequested else { return }
-        await refresh(id)
+        // No follow-up status check: on Ethernet, a connection attempt can itself wake
+        // a sleeping Mac mini. The next check (when a view opens) shows the result.
+        try? await Task.sleep(for: .seconds(40))
+        if mac(id)?.phase == .sleepRequested { update(id) { $0.phase = .unreachable } }
     }
 
     func sleep(_ id: String, after seconds: Int) async {

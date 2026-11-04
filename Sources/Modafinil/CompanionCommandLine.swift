@@ -15,7 +15,7 @@ import ModafinilRemoteProtocol
 /// Run in the logged-in user's session so the login keychain is available.
 enum CompanionCommandLine {
     static func handles(_ arguments: [String]) -> Bool {
-        arguments.count > 1 && (arguments[1].hasPrefix("--companion-") || arguments[1].hasPrefix("--remote-mac-") || arguments[1] == "--install-helper")
+        arguments.count > 1 && (arguments[1].hasPrefix("--companion-") || arguments[1].hasPrefix("--remote-mac") || arguments[1] == "--install-helper")
     }
 
     static func run(_ arguments: [String]) -> Int32 {
