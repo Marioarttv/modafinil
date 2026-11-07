@@ -28,6 +28,37 @@ Opening Modafinil from Launchpad or Finder shows the same controls in a regular 
 
 The menu also includes "Sleep When T3 Threads Finish (Lid Closed)", described below, and an "Only While Codex Is Running" option. When enabled, Modafinil keeps sleep prevention requested but only applies it while a Codex app or `codex` command is running.
 
+## Sleep intent and quiet observers (Mac 0.12.0 / Companion 1.11)
+
+An explicit sleep saves a helper-owned intent to stay asleep. A network or
+maintenance wake gets a 30-second grace period for the phone to authenticate a
+Wake & Keep Awake command, then returns to sleep. Local input/lid opening, a
+wake alarm, explicit keep-awake, quitting the app, or reboot cancels the intent.
+Three automatic returns within ten minutes stop the policy and report persistent
+interference rather than create an endless sleep/wake loop. Native requests are
+still capped at three; kernel sleep verification now allows two minutes for a
+slow transition. Per-request budgets and return deadlines survive helper restarts.
+
+Protocol v7 signs `sleepIntentActive`, which describes the policy, not the current
+physical power state. v1–v6 response payloads omit it and retain their signatures.
+The app does not start its old 90-second recovery lease while the intent is active.
+Remote display-wake assertions are released after 15 seconds and before sleep.
+
+Paired observing Macs receive signed power-intent pushes on tailnet UDP 48767.
+Only authenticated command peers are notified (up to 16); receivers require the
+paired sender's tailnet address and command key, a fresh timestamp and increasing
+revision. Three datagrams tolerate loss; delayed older notices cannot undo a newer
+one. These notices authorize no power command. Observers cache only policy metadata
+under `~/Library/Application Support/Modafinil/remote-power/<tailnet-IP>.json`.
+Automatic remote refreshes skip sleeping Macs, including after app restart.
+
+The user's MacBook mount agent watches that local directory and unmounts normally
+on sleep, then resumes mounting on wake. Busy shares are preserved. This integration
+is in `~/agent-config/tools/macmini-mount`; no SMB health probe runs on an existing
+mount. A missed notice can still leave a client mounted; sleep/wake history remains
+the authority for validation. `--remote-mac-pairing-link <paired name or address>`
+exports an existing pairing for private setup; its output contains secrets.
+
 ## Sleep timer and confirmed results
 
 Use **Sleep Timer** to choose 1–1440 minutes, update, or cancel. The privileged
