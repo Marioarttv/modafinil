@@ -28,11 +28,12 @@ Opening Modafinil from Launchpad or Finder shows the same controls in a regular 
 
 The menu also includes "Sleep When T3 Threads Finish (Lid Closed)", described below, and an "Only While Codex Is Running" option. When enabled, Modafinil keeps sleep prevention requested but only applies it while a Codex app or `codex` command is running.
 
-## Sleep intent and quiet observers (Mac 0.12.0 / Companion 1.11)
+## Sleep intent and quiet observers (Mac 0.12.1 / Companion 1.11)
 
 An explicit sleep saves a helper-owned intent to stay asleep. A network or
-maintenance wake gets a 30-second grace period for the phone to authenticate a
-Wake & Keep Awake command, then returns to sleep. Local input/lid opening, a
+maintenance wake gets a 90-second grace period for the phone to authenticate a
+Wake & Keep Awake command or for macOS to return naturally to sleep. If it stays
+awake, the helper requests sleep again. Local input/lid opening, a
 wake alarm, explicit keep-awake, quitting the app, or reboot cancels the intent.
 Three automatic returns within ten minutes stop the policy and report persistent
 interference rather than create an endless sleep/wake loop. Native requests are
@@ -43,6 +44,14 @@ Protocol v7 signs `sleepIntentActive`, which describes the policy, not the curre
 physical power state. v1–v6 response payloads omit it and retain their signatures.
 The app does not start its old 90-second recovery lease while the intent is active.
 Remote display-wake assertions are released after 15 seconds and before sleep.
+
+Some Apple-silicon dark wakes omit IOKit wake notifications. A five-second dispatch
+timer samples only local kernel state while an intent is active; it does no work
+during system sleep and schedules no hardware wake. The helper retains up to
+512 observed sleep/wake events, which the app imports once into Sleep History.
+The 90-second settling window avoids racing the mini's roughly 50-second natural
+maintenance-sleep transition, observed in live testing. A dedicated regression
+test covers this delayed kernel update.
 
 Paired observing Macs receive signed power-intent pushes on tailnet UDP 48767.
 Only authenticated command peers are notified (up to 16); receivers require the

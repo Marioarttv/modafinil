@@ -1004,6 +1004,7 @@ final class AppDelegate: NSObject,
     private func synchronizeSleepJournal() {
         do {
             let journal = try SleepJournalStore.read()
+            historyRecorder.importHelperEvents(journal.observedPowerEvents ?? [])
             sleepHistoryError = nil
             scheduledSleepDate = journal.schedule?.date
             sleepAttempt = journal.attempt

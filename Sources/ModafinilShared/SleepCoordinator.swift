@@ -32,6 +32,7 @@ public struct SleepJournal: Codable, Equatable {
     public var schedule: SleepSchedule?
     public var attempt: SleepAttempt?
     public var intent: SleepIntent?
+    public var observedPowerEvents: [PowerEvent]?
     public init() {}
 }
 
@@ -124,9 +125,10 @@ public final class SleepCoordinator {
 
     /// How the helper should wake itself: never, once at the timer date, or every
     /// second during verification or a bounded background-wake grace period.
-    public enum TimerMode: Equatable { case idle, deadline(Date), verifying }
+    public enum TimerMode: Equatable { case idle, deadline(Date), verifying, monitoring }
     public var timerMode: TimerMode {
         if journal.attempt?.phase == .pending || isAwaitingFirstWake || journal.intent?.returnAfter != nil { return .verifying }
+        if journal.intent != nil { return .monitoring }
         if let schedule = journal.schedule { return .deadline(schedule.date) }
         return .idle
     }
@@ -340,22 +342,29 @@ public final class SleepCoordinator {
     private func maintainIntent(times: SystemSleepTimes, time: TimeInterval) throws {
         guard var intent = journal.intent else { return }
         guard intent.boot == times.boot else { journal.intent = nil; try persist(); return }
+        let power = snapshot()
         if times.slept > intent.lastSleep {
+            recordPowerEvent(PowerEvent(kind: .sleep, at: times.slept,
+                reason: power?.lastSleepReason, pid: power?.sleepRequestedByPID))
             intent.lastSleep = times.slept
             intent.returnAfter = nil
             lastUserIdle = nil
         }
         if times.woke > intent.lastWake, times.woke >= times.slept {
             intent.lastWake = times.woke
-            let cause = PowerReason.wakeCause(snapshot()?.combinedWakeReason)
+            recordPowerEvent(PowerEvent(kind: .wake, at: times.woke,
+                reason: power?.combinedWakeReason, dark: power?.hasGraphics.map { !$0 }))
+            let cause = PowerReason.wakeCause(power?.combinedWakeReason)
             if cause == .userInput || cause == .lid {
                 journal.intent = nil
                 try persist()
                 return
             }
+            // Apple silicon can take ~50 s to finish a natural maintenance sleep.
+            // Let that transition settle before asking for another sleep.
             // Permit the travelling phone to reconnect and authenticate, without
             // turning on a sleep-prevention lease for incidental Ethernet traffic.
-            intent.returnAfter = time + 30
+            intent.returnAfter = time + 90
             lastUserIdle = userIdle()
         }
         if intent.returnAfter != nil, let idle = userIdle() {
@@ -385,6 +394,12 @@ public final class SleepCoordinator {
             // No disk writes on unchanged verification ticks.
             if intent != lastSavedIntent { try persist() }
         }
+    }
+
+    private func recordPowerEvent(_ event: PowerEvent) {
+        var events = journal.observedPowerEvents ?? []
+        if !events.contains(where: { $0.kind == event.kind && $0.at == event.at }) { events.append(event) }
+        journal.observedPowerEvents = Array(events.suffix(512))
     }
 
     private var lastSavedIntent: SleepIntent?

@@ -6,9 +6,9 @@ private func iokitCommonMessage(_ message: UInt32) -> natural_t {
     natural_t(((0x38 & 0x3f) << 26) | message)
 }
 
-/// Receives every system wake, including dark (background) wakes, which
-/// NSWorkspace does not report. Sleep requests are acknowledged immediately
-/// on a private queue, so this never delays sleep.
+/// Receives macOS power notifications and acknowledges sleep immediately on a
+/// private queue. Some Apple-silicon dark wakes omit these notifications; the
+/// helper also samples kernel timestamps while a sleep intent is active.
 public final class SystemPowerMonitor {
     private let callbackQueue: DispatchQueue
     public init(callbackQueue: DispatchQueue = .main) { self.callbackQueue = callbackQueue }

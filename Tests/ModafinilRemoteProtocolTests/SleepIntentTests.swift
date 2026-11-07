@@ -36,11 +36,11 @@ final class SleepIntentTests: XCTestCase {
         }
         func start() throws { try engine.begin(maintainSleepIntent: true); advance(2) }
     }
-    func testNetworkWakeGetsThirtySecondsThenReturnsToSleep() throws {
+    func testNetworkWakeGetsNinetySecondsThenReturnsToSleep() throws {
         let f = Fixture(); try f.start(); f.sleepAndWake()
         XCTAssertEqual(f.engine.journal.attempt?.phase, .confirmed)
-        XCTAssertEqual(f.engine.journal.intent?.returnAfter, f.clock + 30)
-        f.advance(29); XCTAssertEqual(f.requests, 1)
+        XCTAssertEqual(f.engine.journal.intent?.returnAfter, f.clock + 90)
+        f.advance(89); XCTAssertEqual(f.requests, 1)
         f.advance(1); XCTAssertEqual(f.engine.journal.attempt?.trigger, "sleep intent")
         f.advance(2); XCTAssertEqual(f.requests, 2)
     }
@@ -63,7 +63,7 @@ final class SleepIntentTests: XCTestCase {
     func testDuplicateWakeDoesNotExtendDeadlineAndUnknownWakeIsBounded() throws {
         let f = Fixture(); try f.start(); f.reason = "unknown"; f.sleepAndWake()
         let deadline = f.engine.journal.intent?.returnAfter
-        for _ in 0..<29 { f.advance(1) }
+        for _ in 0..<89 { f.advance(1) }
         XCTAssertEqual(f.engine.journal.intent?.returnAfter, deadline)
         f.advance(1); f.advance(2); XCTAssertEqual(f.requests, 2)
     }
@@ -71,13 +71,13 @@ final class SleepIntentTests: XCTestCase {
         let f = Fixture(); try f.start(); f.sleepAndWake()
         f.times.slept = f.date.timeIntervalSince1970 + 1; f.advance(2)
         XCTAssertNil(f.engine.journal.intent?.returnAfter)
-        XCTAssertEqual(f.engine.timerMode, .idle)
+        XCTAssertEqual(f.engine.timerMode, .monitoring)
         XCTAssertEqual(f.requests, 1)
     }
     func testThreeReturnsInTenMinutesStopWakeStorm() throws {
         let f = Fixture(); try f.start()
-        for _ in 0..<3 { f.sleepAndWake(); f.advance(30); f.advance(2) }
-        f.sleepAndWake(); f.advance(30)
+        for _ in 0..<3 { f.sleepAndWake(); f.advance(90); f.advance(2) }
+        f.sleepAndWake(); f.advance(90)
         XCTAssertNil(f.engine.journal.intent)
         XCTAssertEqual(f.engine.journal.attempt?.phase, .failed)
         XCTAssertTrue(f.engine.journal.attempt?.detail.contains("three returns") == true)
@@ -85,9 +85,9 @@ final class SleepIntentTests: XCTestCase {
     }
     func testSustainedSleepResetsWakeStormBudget() throws {
         let f = Fixture(); try f.start()
-        for _ in 0..<3 { f.sleepAndWake(); f.advance(30); f.advance(2) }
+        for _ in 0..<3 { f.sleepAndWake(); f.advance(90); f.advance(2) }
         f.times.slept = f.date.timeIntervalSince1970 + 1
-        f.times.woke = f.times.slept + 1200; f.advance(1201); f.advance(30); f.advance(2)
+        f.times.woke = f.times.slept + 1200; f.advance(1201); f.advance(90); f.advance(2)
         XCTAssertNotNil(f.engine.journal.intent)
         XCTAssertEqual(f.engine.journal.intent?.returns.count, 1)
     }
@@ -95,7 +95,7 @@ final class SleepIntentTests: XCTestCase {
         let f = Fixture(); try f.start(); f.sleepAndWake(); f.advance(10)
         let restored = f.make(journal: f.saved); try restored.restore()
         XCTAssertNotNil(restored.journal.intent)
-        f.clock += 20; f.date.addTimeInterval(20); restored.tick()
+        f.clock += 80; f.date.addTimeInterval(80); restored.tick()
         XCTAssertEqual(restored.journal.attempt?.trigger, "sleep intent")
         XCTAssertEqual(restored.journal.intent?.returns.count, 1)
     }
@@ -106,11 +106,11 @@ final class SleepIntentTests: XCTestCase {
     }
     func testSaveFailureCannotSendReturnSleepAndStopsPolicy() throws {
         let f = Fixture(); try f.start(); f.sleepAndWake(); f.failSave = true
-        f.advance(30); f.advance(2)
+        f.advance(90); f.advance(2)
         XCTAssertNil(f.engine.journal.intent); XCTAssertEqual(f.requests, 1)
     }
     func testNativeRejectionDuringReturnIsReportedAndStopsPolicy() throws {
-        let f = Fixture(); try f.start(); f.sleepAndWake(); f.advance(30)
+        let f = Fixture(); try f.start(); f.sleepAndWake(); f.advance(90)
         f.failRequest = true; f.advance(2)
         XCTAssertNil(f.engine.journal.intent)
         XCTAssertEqual(f.engine.journal.attempt?.phase, .failed)
@@ -139,12 +139,26 @@ final class SleepIntentTests: XCTestCase {
     }
     func testRestartCannotResetWakeStormBudget() throws {
         let f = Fixture(); try f.start()
-        for _ in 0..<3 { f.sleepAndWake(); f.advance(30); f.advance(2) }
+        for _ in 0..<3 { f.sleepAndWake(); f.advance(90); f.advance(2) }
         f.sleepAndWake()
         let restored = f.make(journal: f.saved); try restored.restore()
-        f.clock += 30; f.date.addTimeInterval(30); restored.tick()
+        f.clock += 90; f.date.addTimeInterval(90); restored.tick()
         XCTAssertNil(restored.journal.intent)
         XCTAssertEqual(restored.journal.attempt?.phase, .failed)
+    }
+    func testSlowNaturalSleepDoesNotConsumeTheRetryBudget() throws {
+        let f = Fixture(); try f.start(); f.sleepAndWake()
+        // powerd starts a maintenance sleep at +25 s, but kern.sleeptime can
+        // remain unchanged until the hardware actually enters deep idle later.
+        f.advance(25); f.advance(10)
+        XCTAssertEqual(f.requests, 1)
+        XCTAssertEqual(f.engine.journal.intent?.returns.count, 0)
+        f.times.slept = f.date.timeIntervalSince1970 + 1; f.advance(20)
+        XCTAssertNil(f.engine.journal.intent?.returnAfter)
+        XCTAssertEqual(f.engine.journal.intent?.returns.count, 0)
+        XCTAssertEqual(f.engine.timerMode, .monitoring)
+        XCTAssertEqual(f.requests, 1)
+        XCTAssertEqual(f.engine.journal.observedPowerEvents?.filter { $0.kind == .sleep }.count, 2)
     }
     func testSleepIntentDoesNoDiskWorkWhileDormant() throws {
         let f = Fixture(); try f.start()

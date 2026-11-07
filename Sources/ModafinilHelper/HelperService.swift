@@ -166,6 +166,11 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         case .verifying:
             timer = DispatchSource.makeTimerSource(queue: stateQueue)
             timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
+        case .monitoring:
+            // Dispatch timers do not schedule a hardware wake. This runs only
+            // while the CPU is awake; some dark wakes omit IOKit notifications.
+            timer = DispatchSource.makeTimerSource(queue: stateQueue)
+            timer.schedule(deadline: .now() + 5, repeating: 5, leeway: .seconds(1))
         case .deadline(let scheduledDate):
             timer = DispatchSource.makeTimerSource(queue: stateQueue)
             let date = sleepCoordinator.timerDeadline(now: Date(), continuousNow: SystemSleepTimes.continuousTime)
