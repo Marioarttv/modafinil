@@ -121,6 +121,31 @@ final class SleepIntentTests: XCTestCase {
         f.sleepAndWake()
         XCTAssertEqual(f.engine.journal.attempt?.phase, .confirmed)
     }
+    func testLocalInputDuringInitialRequestPreventsAnySleepRequest() throws {
+        let f = Fixture(); try f.engine.begin(maintainSleepIntent: true)
+        f.idle = 0; f.advance(2)
+        XCTAssertNil(f.engine.journal.intent)
+        XCTAssertEqual(f.engine.journal.attempt?.phase, .cancelled)
+        XCTAssertEqual(f.requests, 0)
+    }
+    func testPendingIntentResumesExistingBudgetAfterHelperRestart() throws {
+        let f = Fixture(); try f.start()
+        let restored = f.make(journal: f.saved); try restored.restore()
+        XCTAssertEqual(restored.journal.attempt?.attempts, 1)
+        f.clock += 10; f.date.addTimeInterval(10); restored.tick()
+        XCTAssertEqual(f.requests, 2)
+        XCTAssertEqual(restored.journal.attempt?.attempts, 2)
+        XCTAssertEqual(restored.journal.attempt?.deadline, 220)
+    }
+    func testRestartCannotResetWakeStormBudget() throws {
+        let f = Fixture(); try f.start()
+        for _ in 0..<3 { f.sleepAndWake(); f.advance(30); f.advance(2) }
+        f.sleepAndWake()
+        let restored = f.make(journal: f.saved); try restored.restore()
+        f.clock += 30; f.date.addTimeInterval(30); restored.tick()
+        XCTAssertNil(restored.journal.intent)
+        XCTAssertEqual(restored.journal.attempt?.phase, .failed)
+    }
     func testSleepIntentDoesNoDiskWorkWhileDormant() throws {
         let f = Fixture(); try f.start()
         f.times.slept = f.date.timeIntervalSince1970 + 1; f.advance(2)
