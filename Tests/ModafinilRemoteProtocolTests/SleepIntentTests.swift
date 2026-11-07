@@ -160,6 +160,26 @@ final class SleepIntentTests: XCTestCase {
         XCTAssertEqual(f.requests, 1)
         XCTAssertEqual(f.engine.journal.observedPowerEvents?.filter { $0.kind == .sleep }.count, 2)
     }
+    func testNextDarkWakeIsDetectedWithoutAnIOKitNotification() throws {
+        let f = Fixture(); try f.start(); f.sleepAndWake()
+        f.times.slept = f.date.timeIntervalSince1970 + 1; f.advance(2)
+        XCTAssertEqual(f.engine.timerMode, .monitoring)
+        f.times.woke = f.times.slept + 180; f.advance(180)
+        XCTAssertEqual(f.engine.journal.intent?.lastWake, f.times.woke)
+        XCTAssertEqual(f.engine.journal.intent?.returnAfter, f.clock + 90)
+        XCTAssertEqual(f.engine.journal.intent?.returns.count, 0)
+        XCTAssertEqual(f.requests, 1)
+    }
+    func testKernelEventBufferIsBoundedAndSurvivesRestoreWithoutDuplicates() throws {
+        let f = Fixture(); try f.start()
+        for _ in 0..<300 { f.sleepAndWake() }
+        XCTAssertEqual(f.requests, 1)
+        XCTAssertEqual(f.engine.journal.observedPowerEvents?.count, 512)
+        let decoded = try JSONDecoder().decode(SleepJournal.self, from: JSONEncoder().encode(f.saved))
+        let restored = f.make(journal: decoded); try restored.restore(); restored.tick()
+        XCTAssertEqual(restored.journal.observedPowerEvents?.count, 512)
+        XCTAssertEqual(restored.journal.observedPowerEvents, f.saved.observedPowerEvents)
+    }
     func testSleepIntentDoesNoDiskWorkWhileDormant() throws {
         let f = Fixture(); try f.start()
         f.times.slept = f.date.timeIntervalSince1970 + 1; f.advance(2)

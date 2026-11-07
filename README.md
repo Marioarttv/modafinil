@@ -77,18 +77,19 @@ Missed timers never put a just-awakened Mac back to sleep.
 
 The helper requests sleep through public `IOPMSleepSystem`, records a durable
 receipt, and checks kernel sleep/wake timestamps. Acceptance is not confirmation.
-At most three requests run over 32 seconds; any observed sleep ends retries,
-even if the Mac wakes immediately afterward. Native errors and missing sleep
+At most three native requests run per transition, with up to two minutes to
+observe kernel sleep. Any observed sleep ends retries for that transition; an
+active sleep intent handles later background wakes as described above. Native errors and missing sleep
 transitions are reported in both apps. Continuous time bounds the timer and
 verification window despite wall-clock changes. The journal is root-written
 at `/Library/Application Support/Modafinil/sleep-journal.json`; it contains only
 timer/result metadata, with no pairing keys, credentials, or screen contents.
 
-The iPhone clears expired countdowns, refreshes on foreground entry and performs
-one delayed result check. It labels an unreachable Mac as unverified. The Mac
-continues to permit network wake and macOS maintenance; this is not a guarantee
-of uninterrupted deep sleep. Companion 1.4 uses protocol v3; v1/v2 clients remain
-compatible but cannot display sleep receipts.
+Companion 1.11 clears expired countdowns locally and suppresses automatic contact
+after a saved sleep request, including foreground entry. An explicit refresh can
+wake the Mac and is labeled accordingly. Unreachable remains unverified. Network
+wake and macOS maintenance remain enabled; uninterrupted deep sleep is not promised.
+Older phones remain compatible but retain their original checking behavior.
 
 Validation on 2026-09-29 included 40 passing Swift tests, a signed release build,
 Mac timer save/cancel checks, and an approved live one-minute timer. macOS logged
