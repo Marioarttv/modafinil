@@ -77,9 +77,9 @@ final class RemoteMacsController: ObservableObject {
                 var mac = macs.first { $0.id == RemoteMacStore.identifier(configuration) } ?? Mac(configuration: configuration)
                 mac.configuration = configuration
                 if mac.phase == .unknown, let off = Self.shutDownAt(mac.id) {
-                    // Recent: it may still fail, so check rather than assume.
-                    if Date().timeIntervalSince(off) < 6 * 60 { mac.phase = .shuttingDown; verifyLater.append(mac.id) }
-                    else { mac.phase = .off(off) }
+                    // Off only once a check found it gone; otherwise check rather than assume.
+                    if Self.isShutdownVerified(mac.id) { mac.phase = .off(off) }
+                    else { mac.phase = .shuttingDown; verifyLater.append(mac.id) }
                 }
                 return mac
             }
@@ -339,7 +339,11 @@ final class RemoteMacsController: ObservableObject {
 
     private func fail(_ id: String, _ error: Error) {
         update(id) {
-            if RemoteMacClient.indicatesUnavailableDevice(error), let off = Self.shutDownAt(id) { $0.phase = .off(off); return }
+            if RemoteMacClient.indicatesUnavailableDevice(error), let off = Self.shutDownAt(id) {
+                Self.setShutdownVerified(id, true)
+                $0.phase = .off(off)
+                return
+            }
             $0.phase = RemoteMacClient.indicatesUnavailableDevice(error) ? .unreachable : .failed(error.localizedDescription)
         }
     }
@@ -353,6 +357,18 @@ final class RemoteMacsController: ObservableObject {
         guard (values[id] == nil) != (date == nil) else { return }
         values[id] = date?.timeIntervalSince1970
         UserDefaults.standard.set(values, forKey: "remoteMacShutDownAt")
+        setShutdownVerified(id, false)
+    }
+
+    /// The Mac accepted a shutdown and a later check found it gone.
+    private static func isShutdownVerified(_ id: String) -> Bool {
+        UserDefaults.standard.dictionary(forKey: "remoteMacShutdownVerified")?[id] as? Bool == true
+    }
+
+    private static func setShutdownVerified(_ id: String, _ verified: Bool) {
+        var values = UserDefaults.standard.dictionary(forKey: "remoteMacShutdownVerified") ?? [:]
+        values[id] = verified ? true : nil
+        UserDefaults.standard.set(values, forKey: "remoteMacShutdownVerified")
     }
 
     private func mac(_ id: String) -> Mac? { macs.first { $0.id == id } }

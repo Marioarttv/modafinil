@@ -93,6 +93,11 @@ final class AppDelegate: NSObject,
     private var t3ShutdownGate = T3ShutdownGate()
     /// Why the T3 rule has not shut down yet although T3 finished, shown in its status.
     private var t3ShutdownHold: String?
+    /// Held from accepting a shutdown until the helper runs it, so idle sleep cannot
+    /// pause it and let it finish hours later. Released if the shutdown fails.
+    private var shutdownSleepAssertion: IOPMAssertionID = 0
+    /// kern.sleeptime when the shutdown was accepted: a sleep since then cancels it.
+    private var shutdownSleepBaseline: TimeInterval?
     /// Bumped by every timer change, so a slow helper reply cannot restore a cancelled timer.
     private var powerTimerGeneration = 0
 
@@ -1696,6 +1701,13 @@ final class AppDelegate: NSObject,
         completion(.success(()))
 
         // Give the signed answer and the notices time to leave before apps quit.
+        shutdownSleepBaseline = try? SystemSleepTimes.read().slept
+        if shutdownSleepAssertion == 0 {
+            var id = IOPMAssertionID(0)
+            if IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
+                    IOPMAssertionLevel(kIOPMAssertionLevelOn), "Modafinil is shutting the Mac down" as CFString,
+                    &id) == kIOReturnSuccess { shutdownSleepAssertion = id }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self, self.shutdownProgress?.phase == .pending else { return }
             for app in apps { app.terminate() }
@@ -1709,6 +1721,11 @@ final class AppDelegate: NSObject,
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
                 self?.waitForAppsThenShutDown(running, deadline: deadline)
             }
+            return
+        }
+        // Asleep in between (lid closed, power button): the moment has passed; stay on.
+        if let baseline = shutdownSleepBaseline, let slept = try? SystemSleepTimes.read().slept, slept > baseline {
+            failShutdown("The Mac slept before it could shut down, so it stays on. Shut it down again if needed.")
             return
         }
         if !running.isEmpty {
@@ -1741,6 +1758,8 @@ final class AppDelegate: NSObject,
 
     private func failShutdown(_ detail: String) {
         t3ShutdownGate.arm()
+        shutdownSleepBaseline = nil
+        if shutdownSleepAssertion != 0 { IOPMAssertionRelease(shutdownSleepAssertion); shutdownSleepAssertion = 0 }
         shutdownProgress = RemoteShutdown(requestedAt: shutdownProgress?.requestedAt
             ?? Int64(Date().timeIntervalSince1970), phase: .failed,
             trigger: shutdownProgress?.trigger ?? "", detail: detail)
