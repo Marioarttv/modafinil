@@ -88,8 +88,16 @@ final class AppDelegate: NSObject,
     private var shutdownTimer: Timer?
     private var shutdownTimerActivity: NSObjectProtocol?
     private var shutdownProgress: RemoteShutdown?
-    private var t3PowerAction = RemotePowerAction(
-        rawValue: UserDefaults.standard.string(forKey: AppDelegate.t3ActionDefaultsKey) ?? "") ?? .sleep
+    /// Shut Down only while the rule is on; disagreeing defaults (a crash between writes)
+    /// fall back to sleep, so turning the rule on from an old client always means sleep.
+    private var t3PowerAction: RemotePowerAction = {
+        let saved = RemotePowerAction(rawValue: UserDefaults.standard.string(forKey: AppDelegate.t3ActionDefaultsKey) ?? "") ?? .sleep
+        guard saved == .shutdown, UserDefaults.standard.bool(forKey: AppDelegate.t3SleepEnabledDefaultsKey) else {
+            UserDefaults.standard.removeObject(forKey: AppDelegate.t3ActionDefaultsKey)
+            return .sleep
+        }
+        return saved
+    }()
     private var t3ShutdownGate = T3ShutdownGate()
     /// Why the T3 rule has not shut down yet although T3 finished, shown in its status.
     private var t3ShutdownHold: String?
@@ -1873,8 +1881,8 @@ final class AppDelegate: NSObject,
             lastError = "The shutdown timer was dropped because the Mac restarted, or its clock changed a lot, before it was due."
         case .missed:
             setShutdownSchedule(nil)
-            historyRecorder.note("Shutdown timer missed (the Mac was asleep at \(schedule.date.formatted(date: .omitted, time: .shortened))); it stays on")
-            lastError = "The shutdown timer was missed while the Mac was asleep. It stays on."
+            historyRecorder.note("Shutdown timer missed (the Mac was asleep or busy at \(schedule.date.formatted(date: .omitted, time: .shortened))); it stays on")
+            lastError = "The shutdown timer was missed (the Mac was asleep or busy then). It stays on."
         case .due:
             let generation = powerTimerGeneration
             beginShutdown(trigger: "timer", stillWanted: { [weak self] in
@@ -2032,11 +2040,15 @@ final class AppDelegate: NSObject,
             t3ShutdownHold = nil
             beginT3WatchActivity()
         case .waitingForGrace(let sleepAt):
-            // A shutdown countdown is shown only if it would really fire.
-            if t3PowerAction == .shutdown, !t3ShutdownGate.allowsShutdown || !keepAwakeJobs().isEmpty {
+            // A shutdown countdown is shown only if it would really fire; otherwise say why.
+            if t3PowerAction == .shutdown,
+               case .hold(let reason) = t3ShutdownGate.decide(keepAwakeJobs: keepAwakeJobs().map(\.title),
+                                                              isShuttingDown: false) {
                 t3SleepAt = nil
+                if t3ShutdownHold != reason { t3ShutdownHold = reason; refreshUI() }
             } else {
                 t3SleepAt = sleepAt
+                t3ShutdownHold = nil
             }
             beginT3WatchActivity()
         case .sleepNow where t3PowerAction == .shutdown:

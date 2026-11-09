@@ -230,7 +230,8 @@ struct OtherMacsPage: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
-                .disabled(mac.phase.isBusy || mac.phase.isOff)
+                .disabled(mac.phase.isBusy || mac.phase == .shuttingDown)
+                .help(mac.phase.isOff ? "If it is only asleep this wakes it; a shut-down Mac needs its power button." : "")
 
                 Button {
                     sleepConfirmationFor = mac
@@ -372,9 +373,9 @@ struct OtherMacsPopoverSection: View {
                         Button { Task { await macs.wakeAndKeepAwake(mac.id) } } label: {
                             Image(systemName: "power")
                         }
-                        .help(mac.phase.isOff ? "\(mac.name) is shut down; press its power button"
+                        .help(mac.phase.isOff ? "\(mac.name) was shut down; this only helps if it is asleep"
                                               : "Wake \(mac.name) and keep it awake")
-                        .disabled(mac.phase.isBusy || mac.phase.isOff)
+                        .disabled(mac.phase.isBusy || mac.phase == .shuttingDown)
                         .accessibilityIdentifier("popoverWake-\(mac.name)")
                         Menu {
                             Button("Sleep Now") { Task { await macs.sleepNow(mac.id) } }

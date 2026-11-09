@@ -69,7 +69,11 @@ final class RemoteMacsController: ObservableObject {
     /// Re-reads the keychain, keeping each known Mac's live status.
     func reload() {
         var verifyLater: [String] = []
-        defer { verifyLater.forEach { verifyShutdown($0) } }
+        var checkNow: [String] = []
+        defer {
+            verifyLater.forEach { verifyShutdown($0) }
+            for id in checkNow { Task { await refresh(id) } }
+        }
         do {
             let saved = try store.load()
             storeError = nil
@@ -79,6 +83,7 @@ final class RemoteMacsController: ObservableObject {
                 if mac.phase == .unknown, let off = Self.shutDownAt(mac.id) {
                     // Off only once a check found it gone; otherwise check rather than assume.
                     if Self.isShutdownVerified(mac.id) { mac.phase = .off(off) }
+                    else if Date().timeIntervalSince(off) > 6 * 60 { mac.phase = .unknown; checkNow.append(mac.id) }
                     else { mac.phase = .shuttingDown; verifyLater.append(mac.id) }
                 }
                 return mac
@@ -114,6 +119,12 @@ final class RemoteMacsController: ObservableObject {
             var values = UserDefaults.standard.dictionary(forKey: "remoteMacSleepQuietAfter") ?? [:]
             values[mac.id] = sleeping ? Date().timeIntervalSince1970 : nil
             UserDefaults.standard.set(values, forKey: "remoteMacSleepQuietAfter")
+            // A signed "awake" notice from a Mac marked off: it was switched on again.
+            if !sleeping, case .off = mac.phase {
+                Self.setShutDownAt(mac.id, nil)
+                update(mac.id) { $0.phase = .unknown }
+                continue
+            }
             // A push changes policy, not our knowledge of the physical power state.
             if mac.phase.isOffOrShuttingDown { continue }
             if sleeping, !mac.phase.isBusy { update(mac.id) { $0.phase = .sleepRequested } }
