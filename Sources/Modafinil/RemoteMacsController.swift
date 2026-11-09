@@ -233,6 +233,14 @@ final class RemoteMacsController: ObservableObject {
     /// Shuts that Mac down now. Sent only as protocol v8, never downgraded: an older
     /// Mac does not know the command.
     func shutDown(_ id: String) async {
+        // The command line starts without a version: an older Mac would just drop it.
+        if mac(id)?.protocolVersion == nil { await refresh(id) }
+        guard let mac = mac(id), mac.canShutDown else {
+            if let mac = mac(id), mac.protocolVersion != nil {
+                update(id) { $0.phase = .failed("Update Modafinil on \(mac.name) to 0.13.0 to shut it down remotely.") }
+            }
+            return
+        }
         await command(id, .shutdown, working: "Shutting down…", exactVersion: RemoteRequest.shutdownVersion)
     }
 

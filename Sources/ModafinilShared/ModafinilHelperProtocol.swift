@@ -30,13 +30,13 @@ public protocol ModafinilHelperProtocol {
         withReply reply: @escaping (Bool, String?) -> Void
     )
 
-    /// Cancels any sleep timer or pending sleep, then runs `shutdown -h now`. The app
-    /// asks the user's apps to quit first; macOS ends whatever is still running.
     /// Whether the running helper can shut down (it is this version and root), asked
     /// before any app is quit. An older helper fails this call.
     @objc(canShutDownWithReply:)
     func canShutDown(withReply reply: @escaping (Bool, String?) -> Void)
 
+    /// Cancels any sleep timer or pending sleep, then runs `shutdown -h now`. The app
+    /// asks the user's apps to quit first; macOS ends whatever is still running.
     @objc(shutDownNowWithReply:)
     func shutDownNow(withReply reply: @escaping (Bool, String?) -> Void)
 }

@@ -22,11 +22,30 @@ final class ShutdownPlanningTests: XCTestCase {
         XCTAssertEqual(schedule.status(now: now.addingTimeInterval(4200), continuousNow: 4300, bootTime: 5), .missed)
     }
 
-    func testClockSetBackCannotDelayTheTimer() throws {
+    func testClockChangesCannotMoveTheTimer() throws {
         let schedule = try ShutdownSchedule(after: 600, now: now, continuousNow: 100, bootTime: 5)
         XCTAssertEqual(schedule.status(now: now.addingTimeInterval(-3600), continuousNow: 700, bootTime: 5), .due)
         XCTAssertEqual(schedule.status(now: now.addingTimeInterval(-3600), continuousNow: 200, bootTime: 5),
                        .waiting(until: now.addingTimeInterval(-3600 + 500)))
+        // Clock stepped forward an hour: still waits for continuous time.
+        XCTAssertEqual(schedule.status(now: now.addingTimeInterval(3600), continuousNow: 200, bootTime: 5),
+                       .waiting(until: now.addingTimeInterval(3600 + 500)))
+    }
+
+    func testDeadlineInsideTheLastSleepIsMissedEvenJustAfterWaking() throws {
+        // Due 14:00 (now + 600). Asleep from 13:30, woken at 14:00:30.
+        let schedule = try ShutdownSchedule(after: 600, now: now, continuousNow: 100, bootTime: 5)
+        let wake = now.addingTimeInterval(630)
+        let sleep = (slept: now.timeIntervalSince1970 - 1200, woke: wake.timeIntervalSince1970)
+        XCTAssertEqual(schedule.status(now: wake, continuousNow: 730, bootTime: 5, lastSleep: sleep), .missed)
+        // Awake the whole time (last sleep long before): due as normal.
+        let earlier = (slept: now.timeIntervalSince1970 - 9000, woke: now.timeIntervalSince1970 - 8000)
+        XCTAssertEqual(schedule.status(now: wake, continuousNow: 730, bootTime: 5, lastSleep: earlier), .due)
+    }
+
+    func testSmallBootTimeShiftsFromClockStepsKeepTheTimer() throws {
+        let schedule = try ShutdownSchedule(after: 600, now: now, continuousNow: 100, bootTime: 5)
+        XCTAssertNotEqual(schedule.status(now: now, continuousNow: 110, bootTime: 12), .otherBoot)
     }
 
     func testTimerFromAnEarlierBootIsDropped() throws {

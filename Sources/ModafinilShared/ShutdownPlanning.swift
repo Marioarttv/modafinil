@@ -32,15 +32,22 @@ public struct ShutdownSchedule: Codable, Equatable {
         self.init(date: now.addingTimeInterval(seconds), continuousDeadline: continuousNow + seconds, bootTime: bootTime)
     }
 
-    /// Continuous time includes sleep, so a deadline passed while asleep shows as missed,
-    /// and a clock set backwards cannot delay the timer.
-    public func status(now: Date, continuousNow: TimeInterval, bootTime: TimeInterval) -> Status {
-        guard abs(bootTime - self.bootTime) < 1 else { return .otherBoot }
-        let overdue = max(now.timeIntervalSince(date), continuousNow - continuousDeadline)
-        if overdue < 0 {
-            return .waiting(until: min(date, now.addingTimeInterval(continuousDeadline - continuousNow)))
+    /// Fires on continuous time only, so moving the clock either way cannot change when
+    /// it fires; `date` is for display. Continuous time includes sleep, so a deadline
+    /// passed while asleep is missed, and so is one that fell inside the last sleep even
+    /// if the Mac woke within the tolerance: a just-woken Mac is never shut down for it.
+    /// - Parameter lastSleep: kern.sleeptime and kern.waketime, if known.
+    public func status(now: Date, continuousNow: TimeInterval, bootTime: TimeInterval,
+                       lastSleep: (slept: TimeInterval, woke: TimeInterval)? = nil) -> Status {
+        // kern.boottime moves with clock steps; a real restart moves it by far more.
+        guard abs(bootTime - self.bootTime) < 60 else { return .otherBoot }
+        let remaining = continuousDeadline - continuousNow
+        if remaining > 0 { return .waiting(until: now.addingTimeInterval(remaining)) }
+        if let sleep = lastSleep, sleep.slept > 0, sleep.woke >= sleep.slept {
+            let deadline = now.addingTimeInterval(remaining).timeIntervalSince1970
+            if sleep.slept <= deadline, deadline <= sleep.woke { return .missed }
         }
-        return overdue > Self.missedTolerance ? .missed : .due
+        return -remaining > Self.missedTolerance ? .missed : .due
     }
 }
 

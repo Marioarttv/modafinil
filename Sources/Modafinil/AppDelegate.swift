@@ -1030,6 +1030,10 @@ final class AppDelegate: NSObject,
             ))
             return
         }
+        guard shutdownProgress?.phase != .pending else {
+            completion(.failure(CompanionRemoteError("The Mac is shutting down.")))
+            return
+        }
 
         refreshHelperStatus()
         guard helperStatus == .enabled else {
@@ -1278,6 +1282,12 @@ final class AppDelegate: NSObject,
         let previousRequestedState = isSleepPreventionRequested
         let previousProvisionalLease = isProvisionalWakeLeaseActive
 
+        // An explicit sleep replaces a power-down timer, as it does in the helper.
+        if shutdownSchedule != nil {
+            powerTimerGeneration += 1
+            setShutdownSchedule(nil)
+            historyRecorder.note("Shutdown timer cancelled by a sleep request (\(source))")
+        }
         releaseRemoteUserActivity()
         // The wait for new T3 activity belongs to the wake that just ended.
         t3SleepWatch.clearWaitForNewActivity()
@@ -1725,7 +1735,7 @@ final class AppDelegate: NSObject,
         }
         // Asleep in between (lid closed, power button): the moment has passed; stay on.
         if let baseline = shutdownSleepBaseline, let slept = try? SystemSleepTimes.read().slept, slept > baseline {
-            failShutdown("The Mac slept before it could shut down, so it stays on. Shut it down again if needed.")
+            failShutdown("The Mac slept after its apps were asked to quit and before it could shut down, so it stays on. Shut it down again if needed.")
             return
         }
         if !running.isEmpty {
@@ -1834,6 +1844,9 @@ final class AppDelegate: NSObject,
     private func restoreShutdownSchedule() {
         checkShutdownTimer()
         armShutdownTimer()
+        NotificationCenter.default.addObserver(forName: .NSSystemClockDidChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.armShutdownTimer() }
+        }
     }
 
     private func checkShutdownTimer() {
@@ -1843,12 +1856,15 @@ final class AppDelegate: NSObject,
             DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in self?.checkShutdownTimer() }
             return
         }
-        switch schedule.status(now: Date(), continuousNow: SystemSleepTimes.continuousTime, bootTime: boot) {
+        let times = try? SystemSleepTimes.read()
+        switch schedule.status(now: Date(), continuousNow: SystemSleepTimes.continuousTime, bootTime: boot,
+                               lastSleep: times.map { ($0.slept, $0.woke) }) {
         case .waiting:
             armShutdownTimer()
         case .otherBoot:
             setShutdownSchedule(nil)
             historyRecorder.note("Shutdown timer dropped: the Mac restarted before it was due")
+            lastError = "The shutdown timer was dropped because the Mac restarted before it was due."
         case .missed:
             setShutdownSchedule(nil)
             historyRecorder.note("Shutdown timer missed (the Mac was asleep at \(schedule.date.formatted(date: .omitted, time: .shortened))); it stays on")
@@ -1884,9 +1900,9 @@ final class AppDelegate: NSObject,
             shutdownTimerActivity = ProcessInfo.processInfo.beginActivity(
                 options: .userInitiatedAllowingIdleSystemSleep, reason: "Waiting for the shutdown timer")
         }
+        // Continuous time decides; a clock change only re-arms (see restoreShutdownSchedule).
         let remaining = schedule.continuousDeadline - SystemSleepTimes.continuousTime
-        let fire = min(schedule.date, Date().addingTimeInterval(max(0, remaining)))
-        let timer = Timer(fire: max(Date(), fire), interval: 0, repeats: false) { [weak self] _ in
+        let timer = Timer(fire: Date().addingTimeInterval(max(0, remaining)), interval: 0, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.shutdownTimer = nil
                 self?.checkShutdownTimer()
@@ -2398,6 +2414,7 @@ final class AppDelegate: NSObject,
         snapshot.keepAwakeJobs = keepAwakeJobs().map(\.title)
         snapshot.scheduledWakeDate = scheduledWakeDate
         snapshot.canScheduleSleep = helperStatus == .enabled && !isToggleInFlight && !isQuitInProgress
+            && shutdownProgress?.phase != .pending
         snapshot.canScheduleWake = helperStatus == .enabled && !isWakeScheduleInFlight && !isQuitInProgress
         snapshot.sleepAttempt = sleepAttempt
         snapshot.lastError = sleepHistoryError ?? lastError
