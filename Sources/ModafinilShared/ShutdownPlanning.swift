@@ -8,6 +8,9 @@ public struct ShutdownSchedule: Codable, Equatable {
     public var date: Date
     public var continuousDeadline: TimeInterval
     public var bootTime: TimeInterval
+    /// kern.bootsessionuuid: unique per boot, unlike kern.boottime, which moves with
+    /// clock steps and can be close for two quick boots.
+    public var bootSession: String?
 
     public static let allowedSeconds: ClosedRange<TimeInterval> = 60...86_400
     /// Later than this after the deadline (for example after a sleep) counts as missed.
@@ -21,15 +24,28 @@ public struct ShutdownSchedule: Codable, Equatable {
         case otherBoot
     }
 
-    public init(date: Date, continuousDeadline: TimeInterval, bootTime: TimeInterval) {
+    public init(date: Date, continuousDeadline: TimeInterval, bootTime: TimeInterval, bootSession: String? = nil) {
         self.date = date; self.continuousDeadline = continuousDeadline; self.bootTime = bootTime
+        self.bootSession = bootSession
     }
 
-    public init(after seconds: TimeInterval, now: Date, continuousNow: TimeInterval, bootTime: TimeInterval) throws {
+    public init(after seconds: TimeInterval, now: Date, continuousNow: TimeInterval, bootTime: TimeInterval,
+                bootSession: String? = nil) throws {
         guard seconds.isFinite, Self.allowedSeconds.contains(seconds) else {
             throw SleepError("The shutdown timer must be between 1 minute and 24 hours.")
         }
-        self.init(date: now.addingTimeInterval(seconds), continuousDeadline: continuousNow + seconds, bootTime: bootTime)
+        self.init(date: now.addingTimeInterval(seconds), continuousDeadline: continuousNow + seconds,
+                  bootTime: bootTime, bootSession: bootSession)
+    }
+
+    /// This boot's identifier, or nil if macOS does not report one.
+    public static func currentBootSession() -> String? {
+        var size = 0
+        guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0, size > 1 else { return nil }
+        var buffer = [CChar](repeating: 0, count: size)
+        guard sysctlbyname("kern.bootsessionuuid", &buffer, &size, nil, 0) == 0 else { return nil }
+        let value = String(cString: buffer)
+        return value.isEmpty ? nil : value
     }
 
     /// Fires on continuous time only, so moving the clock either way cannot change when
@@ -38,9 +54,18 @@ public struct ShutdownSchedule: Codable, Equatable {
     /// if the Mac woke within the tolerance: a just-woken Mac is never shut down for it.
     /// - Parameter lastSleep: kern.sleeptime and kern.waketime, if known.
     public func status(now: Date, continuousNow: TimeInterval, bootTime: TimeInterval,
+                       bootSession: String? = nil,
                        lastSleep: (slept: TimeInterval, woke: TimeInterval)? = nil) -> Status {
-        // kern.boottime moves with clock steps; a real restart moves it by far more.
-        guard abs(bootTime - self.bootTime) < 60 else { return .otherBoot }
+        if let saved = self.bootSession {
+            // Exact: a timer never survives a restart or power cut.
+            guard saved == bootSession else { return .otherBoot }
+        } else {
+            // Without a session id, kern.boottime (moves with clock steps) within 60 s.
+            guard bootSession == nil, abs(bootTime - self.bootTime) < 60 else { return .otherBoot }
+        }
+        // Continuous time restarts at each boot: a deadline beyond this boot's uptime
+        // can only be from another boot.
+        guard continuousDeadline - continuousNow <= Self.allowedSeconds.upperBound else { return .otherBoot }
         let remaining = continuousDeadline - continuousNow
         if remaining > 0 { return .waiting(until: now.addingTimeInterval(remaining)) }
         if let sleep = lastSleep, sleep.slept > 0, sleep.woke >= sleep.slept {

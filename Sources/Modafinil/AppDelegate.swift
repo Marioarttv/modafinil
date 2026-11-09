@@ -1802,7 +1802,8 @@ final class AppDelegate: NSObject,
         let schedule: ShutdownSchedule
         do {
             schedule = try ShutdownSchedule(after: TimeInterval(seconds), now: Date(),
-                continuousNow: SystemSleepTimes.continuousTime, bootTime: try SystemSleepTimes.read().boot)
+                continuousNow: SystemSleepTimes.continuousTime, bootTime: try SystemSleepTimes.read().boot,
+                bootSession: ShutdownSchedule.currentBootSession())
         } catch {
             completion(.failure(error))
             return
@@ -1862,6 +1863,7 @@ final class AppDelegate: NSObject,
         }
         let times = try? SystemSleepTimes.read()
         switch schedule.status(now: Date(), continuousNow: SystemSleepTimes.continuousTime, bootTime: boot,
+                               bootSession: ShutdownSchedule.currentBootSession(),
                                lastSleep: times.map { ($0.slept, $0.woke) }) {
         case .waiting:
             armShutdownTimer()
@@ -1994,9 +1996,8 @@ final class AppDelegate: NSObject,
         restoreKeepAwakeAfterT3SleepIfLidOpen()
     }
 
-    private func evaluateT3Sleep() {
-        guard !isToggleInFlight, !isQuitInProgress, shutdownProgress?.phase != .pending else { return }
-        let conditions = T3SleepWatch.Conditions(
+    private var currentT3Conditions: T3SleepWatch.Conditions {
+        T3SleepWatch.Conditions(
             isEnabled: isT3SleepEnabled,
             isKeepAwakeOn: isKeepAwakeOnForT3Watch,
             isLidClosed: lidMonitor.isLidClosed(),
@@ -2004,6 +2005,11 @@ final class AppDelegate: NSObject,
             isDesktop: !LidMonitor.hasBuiltInLid,
             userIdleSeconds: LidMonitor.userIdleSeconds()
         )
+    }
+
+    private func evaluateT3Sleep() {
+        guard !isToggleInFlight, !isQuitInProgress, shutdownProgress?.phase != .pending else { return }
+        let conditions = currentT3Conditions
         // Desktop: real keyboard or mouse use after a remote wake means someone is here,
         // like opening a MacBook's lid. The wake's own display wake-up does not count.
         if conditions.isDesktop, t3SleepWatch.waitsForNewActivity, let idle = conditions.userIdleSeconds,
@@ -2050,8 +2056,14 @@ final class AppDelegate: NSObject,
                 endT3WatchActivity()
                 beginShutdown(trigger: "T3 Code finished", stillWanted: { [weak self] in
                     guard let self else { return false }
-                    return self.isT3SleepEnabled && self.t3PowerAction == .shutdown && self.t3ShutdownGate.allowsShutdown
-                        && self.isKeepAwakeOnForT3Watch && !self.isToggleInFlight && !self.isSomeoneAtTheMac
+                    // Everything read again: someone at the Mac, a new T3 run or a keep-awake job wins.
+                    guard self.t3PowerAction == .shutdown, self.t3ShutdownGate.allowsShutdown,
+                          !self.isToggleInFlight, !self.isSomeoneAtTheMac, self.currentT3Conditions.isWatching,
+                          self.readT3Activity().isFinished, self.keepAwakeJobs().isEmpty else {
+                        self.t3SleepWatch.reset() // start the grace period over
+                        return false
+                    }
+                    return true
                 }) { [weak self] result in
                     guard let self, case .failure(let error) = result, !(error is ShutdownSkipped) else { return }
                     // Needs a new T3 run before trying again, so a failure cannot repeat every 15 s.

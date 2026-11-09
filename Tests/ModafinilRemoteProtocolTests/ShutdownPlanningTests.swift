@@ -43,6 +43,17 @@ final class ShutdownPlanningTests: XCTestCase {
         XCTAssertEqual(schedule.status(now: wake, continuousNow: 730, bootTime: 5, lastSleep: earlier), .due)
     }
 
+    func testBootSessionDecidesWhenKnown() throws {
+        let schedule = try ShutdownSchedule(after: 600, now: now, continuousNow: 100, bootTime: 5, bootSession: "A")
+        XCTAssertEqual(schedule.status(now: now, continuousNow: 110, bootTime: 5, bootSession: "A"),
+                       .waiting(until: now.addingTimeInterval(590)))
+        // Two boots seconds apart: different sessions.
+        XCTAssertEqual(schedule.status(now: now, continuousNow: 110, bootTime: 20, bootSession: "B"), .otherBoot)
+        XCTAssertEqual(schedule.status(now: now, continuousNow: 110, bootTime: 5, bootSession: nil), .otherBoot)
+        // A large clock step moves kern.boottime but not the session.
+        XCTAssertNotEqual(schedule.status(now: now, continuousNow: 110, bootTime: 5000, bootSession: "A"), .otherBoot)
+    }
+
     func testSmallBootTimeShiftsFromClockStepsKeepTheTimer() throws {
         let schedule = try ShutdownSchedule(after: 600, now: now, continuousNow: 100, bootTime: 5)
         XCTAssertNotEqual(schedule.status(now: now, continuousNow: 110, bootTime: 12), .otherBoot)
