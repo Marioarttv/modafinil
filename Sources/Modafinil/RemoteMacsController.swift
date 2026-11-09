@@ -61,6 +61,8 @@ final class RemoteMacsController: ObservableObject {
     @Published private(set) var storeError: String?
 
     private let store = RemoteMacStore()
+    private var failedShutdownChecks: [String: Int] = [:]
+    private var pendingRecheck: Set<String> = []
     private var generations: [String: Int] = [:]
     private var lastRefreshAll: Date?
 
@@ -334,6 +336,7 @@ final class RemoteMacsController: ObservableObject {
             mac.protocolVersion = response.version
             mac.scheduledAction = state.scheduledAction
             mac.shutdown = state.shutdown
+            failedShutdownChecks[id] = nil
             Self.setShutDownAt(id, state.shutdown.flatMap { $0.phase == .pending
                 ? Date(timeIntervalSince1970: TimeInterval($0.requestedAt)) : nil })
             if state.shutdown?.phase == .pending { mac.phase = .shuttingDown }
@@ -357,9 +360,21 @@ final class RemoteMacsController: ObservableObject {
     }
 
     private func fail(_ id: String, _ error: Error) {
+        defer {
+            if pendingRecheck.remove(id) != nil {
+                Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 150 * 1_000_000_000)
+                    guard let self, case .off = self.mac(id)?.phase else { return }
+                    await self.refresh(id)
+                }
+            }
+        }
         update(id) {
             if RemoteMacClient.indicatesUnavailableDevice(error), let off = Self.shutDownAt(id) {
-                Self.setShutdownVerified(id, true)
+                // Two failed checks in a row, as on the iPhone: one could be this Mac offline.
+                failedShutdownChecks[id, default: 0] += 1
+                if failedShutdownChecks[id]! >= 2 { Self.setShutdownVerified(id, true) }
+                else if Date().timeIntervalSince(off) < 6 * 60 { pendingRecheck.insert(id) }
                 $0.phase = .off(off)
                 return
             }

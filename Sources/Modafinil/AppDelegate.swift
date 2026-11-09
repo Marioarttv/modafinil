@@ -1891,7 +1891,11 @@ final class AppDelegate: NSObject,
             }) { [weak self] result in
                 // Cancelled, replaced or already running: nothing failed, and a newer timer stays.
                 guard let self, case .failure(let error) = result, !(error is ShutdownSkipped) else { return }
-                if self.powerTimerGeneration == generation, self.shutdownSchedule == schedule { self.setShutdownSchedule(nil) }
+                guard self.powerTimerGeneration == generation, self.shutdownSchedule == schedule else {
+                    self.historyRecorder.note("An older shutdown timer could not start: \(error.localizedDescription)")
+                    return
+                }
+                self.setShutdownSchedule(nil)
                 self.lastError = "The shutdown timer could not start: \(error.localizedDescription)"
                 self.historyRecorder.note("Shutdown timer failed: \(error.localizedDescription)")
             }
