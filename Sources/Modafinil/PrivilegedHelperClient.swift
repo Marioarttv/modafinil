@@ -206,7 +206,7 @@ final class PrivilegedHelperClient {
             case .failure(let error): finish(.failure(error))
             case .success(let proxy):
                 proxy.shutDownNow { success, message in
-                    finish(success ? .success(()) : .failure(HelperError(message ?? "The helper could not shut the Mac down.")))
+                    finish(success ? .success(()) : .failure(HelperRefused(message: message ?? "The helper could not shut the Mac down.")))
                 }
             }
         }
@@ -256,6 +256,12 @@ final class PrivilegedHelperClient {
         }
         connection.resume()
         return connection
+    }
+
+    /// The helper answered and refused (as opposed to no answer at all).
+    struct HelperRefused: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
     }
 
     struct HelperError: LocalizedError {

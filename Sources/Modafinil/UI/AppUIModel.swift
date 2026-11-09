@@ -158,7 +158,7 @@ enum T3SleepWording {
 
 enum UIFormat {
     /// Shown before every shutdown: what it means for a Mac controlled from far away.
-    static let shutdownWarning = "The Mac turns off completely. Wake-on-LAN, the iPad relay and wake alarms cannot start it again; someone has to press its power button. Apps are asked to quit; unsaved work may be lost."
+    static let shutdownWarning = "The Mac turns off completely. Wake-on-LAN, the iPad relay and wake alarms cannot start it again; someone has to press its power button. Apps are asked to quit; unsaved work may be lost. If “Sleep when T3 Code finishes” is set to shut down, it is turned off."
 
     static func duration(_ seconds: Double) -> String {
         let total = Int(seconds.rounded())

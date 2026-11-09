@@ -106,6 +106,8 @@ final class AppDelegate: NSObject,
     private var shutdownSleepAssertion: IOPMAssertionID = 0
     /// kern.sleeptime when the shutdown was accepted: a sleep since then cancels it.
     private var shutdownSleepBaseline: TimeInterval?
+    /// This shutdown turned "Sleep when T3 finishes" off; a failure says so.
+    private var shutdownTurnedOffT3Rule = false
     /// Bumped by every timer change, so a slow helper reply cannot restore a cancelled timer.
     private var powerTimerGeneration = 0
 
@@ -1704,6 +1706,8 @@ final class AppDelegate: NSObject,
                 : "Quitting \(names.prefix(6).joined(separator: ", "))\(names.count > 6 ? " and \(names.count - 6) more" : ""), then shutting down.")
         powerTimerGeneration += 1
         setShutdownSchedule(nil)
+        historyRecorder.note("Shutting down (\(trigger))")
+        shutdownTurnedOffT3Rule = false
         // A T3 shutdown is one-time: the rule turns itself off (and its action back to
         // Sleep), so the Mac comes back on with "Sleep when T3 finishes" off. The same for
         // any other shutdown while the rule is set to shut down, so a power-on never
@@ -1711,6 +1715,7 @@ final class AppDelegate: NSObject,
         if trigger == Self.t3ShutdownTrigger || (isT3SleepEnabled && t3PowerAction == .shutdown) {
             setT3SleepEnabled(false, source: "after its shutdown")
             CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication)
+            shutdownTurnedOffT3Rule = true
         }
         // No sleep timer, pending sleep or sleep intent may beat the shutdown.
         helperClient.setSleepTimer(after: -1) { [weak self] result in
@@ -1719,7 +1724,6 @@ final class AppDelegate: NSObject,
             }
             self?.synchronizeSleepJournal()
         }
-        historyRecorder.note("Shutting down (\(trigger))")
         lastError = nil
         // Tells Macs that mount this one to let go, like a sleep notice.
         powerNotices.publish(sleeping: true, secret: companionConfigurationStore.secret)
@@ -1776,8 +1780,18 @@ final class AppDelegate: NSObject,
                           progress.requestedAt == requestedAt else { return }
                     self.failShutdown("macOS accepted the shutdown but is still running after 3 minutes.")
                 }
-            case .failure(let error):
+            case .failure(let error) where error is PrivilegedHelperClient.HelperRefused:
                 self.failShutdown("The Mac did not shut down: \(error.localizedDescription)")
+            case .failure(let error):
+                // Sent, but no answer: launchd may already be stopping the helper. Stay
+                // pending; the 3-minute watchdog reports a Mac that is still running.
+                self.historyRecorder.note("Shutdown sent; the helper did not confirm (\(error.localizedDescription))")
+                let requestedAt = self.shutdownProgress?.requestedAt
+                DispatchQueue.main.asyncAfter(deadline: .now() + 180) { [weak self] in
+                    guard let self, let progress = self.shutdownProgress, progress.phase == .pending,
+                          progress.requestedAt == requestedAt else { return }
+                    self.failShutdown("The helper did not confirm the shutdown and the Mac is still running after 3 minutes.")
+                }
             }
         }
     }
@@ -1791,7 +1805,8 @@ final class AppDelegate: NSObject,
 
     private func failShutdown(_ detail: String) {
         var detail = detail
-        if shutdownProgress?.trigger == Self.t3ShutdownTrigger {
+        if shutdownTurnedOffT3Rule {
+            shutdownTurnedOffT3Rule = false
             detail += " “Sleep when T3 Code finishes” was turned off; turn it on again if wanted."
         }
         t3ShutdownGate.arm()
