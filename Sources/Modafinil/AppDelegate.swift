@@ -1382,7 +1382,9 @@ final class AppDelegate: NSObject,
         var summary = activity.summary
         if t3PowerAction == .shutdown {
             if let hold = t3ShutdownHold, activity.isFinished { summary += " · " + hold }
-            else if !t3ShutdownGate.allowsShutdown, activity.isFinished { summary += " · shuts down after the next T3 run" }
+            else if !t3ShutdownGate.allowsShutdown, activity.isFinished || t3ShutdownGate.requiresNewRun {
+                summary += " · shuts down after the next T3 run"
+            }
             else if !LidMonitor.hasBuiltInLid { summary += " · shuts down once unused for 5 min" }
             else { summary += " · shuts down when finished" }
         } else if t3SleepWatch.waitsForNewActivity, activity.isFinished {
@@ -1631,7 +1633,10 @@ final class AppDelegate: NSObject,
     /// Asks the user's apps to quit like ⌘Q, waits up to 30 s, then the helper runs
     /// `shutdown -h now`, which ends whatever is still running. `completion` runs once
     /// the shutdown has started (before apps quit), so a remote caller gets its answer.
-    private func beginShutdown(trigger: String, completion: @escaping (Result<Void, Error>) -> Void) {
+    /// `stillWanted` is checked again after the helper check, so a cancel, a rule change
+    /// or a wake during it wins.
+    private func beginShutdown(trigger: String, stillWanted: @escaping () -> Bool = { true },
+                               completion: @escaping (Result<Void, Error>) -> Void) {
         guard shutdownProgress?.phase != .pending else {
             completion(.failure(CompanionRemoteError("The Mac is already shutting down.")))
             return
@@ -1654,6 +1659,10 @@ final class AppDelegate: NSObject,
             case .success:
                 guard self.shutdownProgress?.phase != .pending, !self.isQuitInProgress else {
                     completion(.failure(CompanionRemoteError("The Mac is already shutting down.")))
+                    return
+                }
+                guard stillWanted() else {
+                    completion(.failure(CompanionRemoteError("The shutdown was cancelled.")))
                     return
                 }
                 self.startShutdown(trigger: trigger, completion: completion)
@@ -1826,7 +1835,11 @@ final class AppDelegate: NSObject,
             historyRecorder.note("Shutdown timer missed (the Mac was asleep at \(schedule.date.formatted(date: .omitted, time: .shortened))); it stays on")
             lastError = "The shutdown timer was missed while the Mac was asleep. It stays on."
         case .due:
-            beginShutdown(trigger: "timer") { [weak self] result in
+            let generation = powerTimerGeneration
+            beginShutdown(trigger: "timer", stillWanted: { [weak self] in
+                guard let self else { return false }
+                return self.powerTimerGeneration == generation && self.shutdownSchedule == schedule
+            }) { [weak self] result in
                 if case .failure(let error) = result {
                     self?.setShutdownSchedule(nil)
                     self?.lastError = "The shutdown timer could not start: \(error.localizedDescription)"
@@ -1996,7 +2009,11 @@ final class AppDelegate: NSObject,
                 t3ShutdownHold = nil
                 t3SleepWatch.reset()
                 endT3WatchActivity()
-                beginShutdown(trigger: "T3 Code finished") { [weak self] result in
+                beginShutdown(trigger: "T3 Code finished", stillWanted: { [weak self] in
+                    guard let self else { return false }
+                    return self.isT3SleepEnabled && self.t3PowerAction == .shutdown && self.t3ShutdownGate.allowsShutdown
+                        && self.isKeepAwakeOnForT3Watch
+                }) { [weak self] result in
                     guard let self, case .failure(let error) = result else { return }
                     // Needs a new T3 run before trying again, so a failure cannot repeat every 15 s.
                     self.t3ShutdownGate.arm()

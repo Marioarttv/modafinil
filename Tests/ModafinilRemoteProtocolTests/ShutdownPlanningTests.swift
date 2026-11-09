@@ -78,6 +78,16 @@ final class ShutdownPlanningTests: XCTestCase {
         XCTAssertEqual(gate.decide(keepAwakeJobs: [], isShuttingDown: false), .hold(nil))
     }
 
+    func testARunAlreadyGoingWhenShutdownIsChosenCounts() {
+        // Launch, start a render at +10, choose Shut Down at +20 while it runs.
+        var gate = T3ShutdownGate(armedAt: now)
+        gate.arm(at: now.addingTimeInterval(20))
+        gate.noteLatestRun(requestedAt: now.addingTimeInterval(10))
+        XCTAssertFalse(gate.allowsShutdown)
+        gate.note(.busy([T3ActiveThread(title: "Render", status: "running")]))
+        XCTAssertTrue(gate.allowsShutdown)
+    }
+
     func testT3ShutdownNeedsWorkSinceArming() {
         var gate = T3ShutdownGate(armedAt: now, requiresNewRun: false)
         XCTAssertFalse(gate.allowsShutdown)

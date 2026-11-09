@@ -68,13 +68,19 @@ final class RemoteMacsController: ObservableObject {
 
     /// Re-reads the keychain, keeping each known Mac's live status.
     func reload() {
+        var verifyLater: [String] = []
+        defer { verifyLater.forEach { verifyShutdown($0) } }
         do {
             let saved = try store.load()
             storeError = nil
             macs = saved.map { configuration in
                 var mac = macs.first { $0.id == RemoteMacStore.identifier(configuration) } ?? Mac(configuration: configuration)
                 mac.configuration = configuration
-                if mac.phase == .unknown, let off = Self.shutDownAt(mac.id) { mac.phase = .off(off) }
+                if mac.phase == .unknown, let off = Self.shutDownAt(mac.id) {
+                    // Recent: it may still fail, so check rather than assume.
+                    if Date().timeIntervalSince(off) < 6 * 60 { mac.phase = .shuttingDown; verifyLater.append(mac.id) }
+                    else { mac.phase = .off(off) }
+                }
                 return mac
             }
         } catch {

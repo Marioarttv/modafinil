@@ -385,14 +385,17 @@ public struct T3SleepWatch {
 /// chosen, the rule was turned on, or a remote wake). A Mac switched on again with the
 /// power button, or woken remotely, is never shut down just because T3 is idle.
 public struct T3ShutdownGate: Equatable {
+    public let launchedAt: Date
     public private(set) var armedAt: Date
     public private(set) var sawWork = false
     /// After a launch (a boot, usually), threads cut off by the last shutdown can still
-    /// read as working until T3 tidies them up: only a run requested since counts.
+    /// read as working until T3 tidies them up: only a run requested since the launch
+    /// makes "seen working" count.
     public private(set) var requiresNewRun: Bool
 
     /// The app's launch: needs a run requested after it.
     public init(armedAt: Date = Date(), requiresNewRun: Bool = true) {
+        self.launchedAt = armedAt
         self.armedAt = armedAt
         self.requiresNewRun = requiresNewRun
     }
@@ -411,8 +414,11 @@ public struct T3ShutdownGate: Equatable {
     }
 
     /// A run requested after arming counts even if it ended between two checks.
+    /// A run already going when the rule is armed counts once T3 is seen working.
     public mutating func noteLatestRun(requestedAt date: Date?) {
-        if let date, date > armedAt { sawWork = true; requiresNewRun = false }
+        guard let date else { return }
+        if date > launchedAt { requiresNewRun = false }
+        if date > armedAt { sawWork = true }
     }
 
     public var allowsShutdown: Bool { sawWork }

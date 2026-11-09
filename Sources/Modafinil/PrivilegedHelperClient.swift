@@ -180,7 +180,7 @@ final class PrivilegedHelperClient {
         }
         remoteProxy { result in
             switch result {
-            case .failure: finish(.failure(HelperError("The helper on this Mac is out of date. Open Modafinil there so it updates its helper.")))
+            case .failure(let error): finish(.failure(HelperError("Could not reach the helper (\(error.localizedDescription)). Open Modafinil on this Mac; it may need to update its helper.")))
             case .success(let proxy):
                 proxy.canShutDown { success, message in
                     finish(success ? .success(()) : .failure(HelperError(message ?? "The helper cannot shut the Mac down.")))
