@@ -1720,6 +1720,9 @@ final class AppDelegate: NSObject,
 
         // Give the signed answer and the notices time to leave before apps quit.
         shutdownSleepBaseline = try? SystemSleepTimes.read().slept
+        if shutdownSleepBaseline == nil {
+            historyRecorder.note("Shutdown: macOS sleep times unreadable, so a sleep during the app-quit wait cannot be detected")
+        }
         if shutdownSleepAssertion == 0 {
             var id = IOPMAssertionID(0)
             if IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
