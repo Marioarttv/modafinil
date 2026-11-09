@@ -1653,7 +1653,7 @@ final class AppDelegate: NSObject,
     private func beginShutdown(trigger: String, stillWanted: @escaping () -> Bool = { true },
                                completion: @escaping (Result<Void, Error>) -> Void) {
         guard shutdownProgress?.phase != .pending else {
-            completion(.failure(CompanionRemoteError("The Mac is already shutting down.")))
+            completion(.failure(ShutdownSkipped("The Mac is already shutting down.")))
             return
         }
         guard !isQuitInProgress else {
@@ -1673,11 +1673,11 @@ final class AppDelegate: NSObject,
             case .failure(let error): completion(.failure(error))
             case .success:
                 guard self.shutdownProgress?.phase != .pending, !self.isQuitInProgress else {
-                    completion(.failure(CompanionRemoteError("The Mac is already shutting down.")))
+                    completion(.failure(ShutdownSkipped("The Mac is already shutting down.")))
                     return
                 }
                 guard stillWanted() else {
-                    completion(.failure(CompanionRemoteError("The shutdown was cancelled.")))
+                    completion(.failure(ShutdownSkipped("The shutdown was cancelled.")))
                     return
                 }
                 self.startShutdown(trigger: trigger, completion: completion)
@@ -1720,6 +1720,10 @@ final class AppDelegate: NSObject,
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             guard let self, self.shutdownProgress?.phase == .pending else { return }
+            if let baseline = self.shutdownSleepBaseline, let slept = try? SystemSleepTimes.read().slept, slept > baseline {
+                self.failShutdown("The Mac slept before its apps were asked to quit, so it stays on. Shut it down again if needed.")
+                return
+            }
             for app in apps { app.terminate() }
             self.waitForAppsThenShutDown(apps, deadline: Date().addingTimeInterval(30))
         }
@@ -1863,8 +1867,8 @@ final class AppDelegate: NSObject,
             armShutdownTimer()
         case .otherBoot:
             setShutdownSchedule(nil)
-            historyRecorder.note("Shutdown timer dropped: the Mac restarted before it was due")
-            lastError = "The shutdown timer was dropped because the Mac restarted before it was due."
+            historyRecorder.note("Shutdown timer dropped: the Mac restarted, or its clock changed a lot, before it was due")
+            lastError = "The shutdown timer was dropped because the Mac restarted, or its clock changed a lot, before it was due."
         case .missed:
             setShutdownSchedule(nil)
             historyRecorder.note("Shutdown timer missed (the Mac was asleep at \(schedule.date.formatted(date: .omitted, time: .shortened))); it stays on")
@@ -1875,11 +1879,11 @@ final class AppDelegate: NSObject,
                 guard let self else { return false }
                 return self.powerTimerGeneration == generation && self.shutdownSchedule == schedule
             }) { [weak self] result in
-                if case .failure(let error) = result {
-                    self?.setShutdownSchedule(nil)
-                    self?.lastError = "The shutdown timer could not start: \(error.localizedDescription)"
-                    self?.historyRecorder.note("Shutdown timer failed: \(error.localizedDescription)")
-                }
+                // Cancelled, replaced or already running: nothing failed, and a newer timer stays.
+                guard let self, case .failure(let error) = result, !(error is ShutdownSkipped) else { return }
+                if self.powerTimerGeneration == generation, self.shutdownSchedule == schedule { self.setShutdownSchedule(nil) }
+                self.lastError = "The shutdown timer could not start: \(error.localizedDescription)"
+                self.historyRecorder.note("Shutdown timer failed: \(error.localizedDescription)")
             }
         }
         refreshIcon()
@@ -2047,9 +2051,9 @@ final class AppDelegate: NSObject,
                 beginShutdown(trigger: "T3 Code finished", stillWanted: { [weak self] in
                     guard let self else { return false }
                     return self.isT3SleepEnabled && self.t3PowerAction == .shutdown && self.t3ShutdownGate.allowsShutdown
-                        && self.isKeepAwakeOnForT3Watch
+                        && self.isKeepAwakeOnForT3Watch && !self.isToggleInFlight && !self.isSomeoneAtTheMac
                 }) { [weak self] result in
-                    guard let self, case .failure(let error) = result else { return }
+                    guard let self, case .failure(let error) = result, !(error is ShutdownSkipped) else { return }
                     // Needs a new T3 run before trying again, so a failure cannot repeat every 15 s.
                     self.t3ShutdownGate.arm()
                     self.lastError = "Could not shut down after T3 Code finished: \(error.localizedDescription)"
@@ -2548,4 +2552,11 @@ final class AppDelegate: NSObject,
     private static let shutdownScheduleDefaultsKey = "ShutdownSchedule"
     private static let quitBlockersDefaultsKey = "QuitSleepBlockersBeforeSleep"
     private static let quitBlockersExclusionsDefaultsKey = "QuitSleepBlockersExclusions"
+}
+
+/// A shutdown that did not start because it was cancelled or is already running; not a failure.
+struct ShutdownSkipped: LocalizedError {
+    let message: String
+    init(_ message: String) { self.message = message }
+    var errorDescription: String? { message }
 }
