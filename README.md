@@ -39,10 +39,10 @@ Modafinil can turn a Mac off completely, from the iPhone, from another Mac
   the current boot, is cancelled by quitting Modafinil or logging out, and never fires late: a Mac that
   slept through the time stays on.
 - **When T3 Code finishes: Shut Down**: the T3 rule's *Then* choice. It shuts down only after
-  T3 has been seen working since the rule was armed (a run already going then counts; after
-  Modafinil starts, only a run started since) (Modafinil started, the choice or the
-  switch changed, any wake from sleep, or a remote Wake & Keep Awake), so a Mac switched on
-  again is never shut down just because T3 is idle. It also waits while a command-line
+  T3 has been seen working since the rule was armed: Modafinil started, the choice or the
+  switch changed, any wake from sleep, or a remote Wake & Keep Awake. A run already going
+  then counts, except after Modafinil starts, when only a run started since does. So a Mac
+  switched on again is never shut down just because T3 is idle. It also waits while a command-line
   process holds a sleep assertion (anything run under `caffeinate -i`, for example); the T3
   status names it and `Modafinil --t3-activity` lists them. A job that holds no assertion
   (a render started with `nohup` or in `tmux` after its T3 thread finished, a plain
