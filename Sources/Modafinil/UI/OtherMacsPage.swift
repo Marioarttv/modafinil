@@ -143,7 +143,7 @@ struct OtherMacsPage: View {
             }
             Button("Cancel", role: .cancel) { t3ShutdownConfirmationFor = nil }
         } message: {
-            Text(UIFormat.shutdownWarning + " It shuts down only after a T3 run finishes there, never right after it is turned on or woken.")
+            Text(UIFormat.shutdownWarning + " It shuts down only after a T3 run finishes there, never right after it is turned on or woken. Once it has, the rule turns itself off.")
         }
     }
 

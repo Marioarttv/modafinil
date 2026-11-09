@@ -1704,6 +1704,14 @@ final class AppDelegate: NSObject,
                 : "Quitting \(names.prefix(6).joined(separator: ", "))\(names.count > 6 ? " and \(names.count - 6) more" : ""), then shutting down.")
         powerTimerGeneration += 1
         setShutdownSchedule(nil)
+        // A T3 shutdown is one-time: the rule turns itself off (and its action back to
+        // Sleep), so the Mac comes back on with "Sleep when T3 finishes" off. The same for
+        // any other shutdown while the rule is set to shut down, so a power-on never
+        // inherits it. A rule set to Sleep is left alone.
+        if trigger == Self.t3ShutdownTrigger || (isT3SleepEnabled && t3PowerAction == .shutdown) {
+            setT3SleepEnabled(false, source: "after its shutdown")
+            CFPreferencesAppSynchronize(kCFPreferencesCurrentApplication)
+        }
         // No sleep timer, pending sleep or sleep intent may beat the shutdown.
         helperClient.setSleepTimer(after: -1) { [weak self] result in
             if case .failure(let error) = result {
@@ -1782,6 +1790,10 @@ final class AppDelegate: NSObject,
     }
 
     private func failShutdown(_ detail: String) {
+        var detail = detail
+        if shutdownProgress?.trigger == Self.t3ShutdownTrigger {
+            detail += " “Sleep when T3 Code finishes” was turned off; turn it on again if wanted."
+        }
         t3ShutdownGate.arm()
         shutdownSleepBaseline = nil
         if shutdownSleepAssertion != 0 { IOPMAssertionRelease(shutdownSleepAssertion); shutdownSleepAssertion = 0 }
@@ -2073,7 +2085,7 @@ final class AppDelegate: NSObject,
                 t3ShutdownHold = nil
                 t3SleepWatch.reset()
                 endT3WatchActivity()
-                beginShutdown(trigger: "T3 Code finished", stillWanted: { [weak self] in
+                beginShutdown(trigger: Self.t3ShutdownTrigger, stillWanted: { [weak self] in
                     guard let self else { return false }
                     // Everything read again: someone at the Mac, a new T3 run or a keep-awake job wins.
                     guard self.t3PowerAction == .shutdown, self.t3ShutdownGate.allowsShutdown,
@@ -2580,6 +2592,7 @@ final class AppDelegate: NSObject,
     private static let t3SleepEnabledDefaultsKey = "T3SleepWhenFinishedEnabled"
     private static let t3SleepRestoreDefaultsKey = "T3SleepRestoreKeepAwake"
     private static let t3ActionDefaultsKey = "T3SleepWhenFinishedAction"
+    private static let t3ShutdownTrigger = "T3 Code finished"
     private static let shutdownScheduleDefaultsKey = "ShutdownSchedule"
     private static let quitBlockersDefaultsKey = "QuitSleepBlockersBeforeSleep"
     private static let quitBlockersExclusionsDefaultsKey = "QuitSleepBlockersExclusions"

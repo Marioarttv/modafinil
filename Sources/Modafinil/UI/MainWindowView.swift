@@ -138,7 +138,7 @@ struct T3SleepCard: View {
                 .confirmationDialog("Shut down when T3 Code finishes?", isPresented: $confirmsShutdown) {
                     Button("Shut Down When Finished", role: .destructive) { setAction(.shutdown) }
                 } message: {
-                    Text(UIFormat.shutdownWarning + " It shuts down only after a T3 run finishes, never right after it is turned on or woken, and waits for jobs run under caffeinate -i. Other background jobs are ended.")
+                    Text(UIFormat.shutdownWarning + " It shuts down only after a T3 run finishes, never right after it is turned on or woken, and waits for jobs run under caffeinate -i. Other background jobs are ended. Once it has shut down, the rule turns itself off.")
                 }
             }
             if !snapshot.isT3SleepEnabled {
