@@ -40,10 +40,13 @@ Modafinil can turn a Mac off completely, from the iPhone, from another Mac
   slept through the time stays on.
 - **When T3 Code finishes: Shut Down**: the T3 rule's *Then* choice. It shuts down only after
   a T3 run has finished since the rule was armed (Modafinil started, the choice or the
-  switch changed, or a remote Wake & Keep Awake), so a Mac switched on again is never shut
-  down just because T3 is idle. It also waits while a command-line job keeps the Mac awake
-  on purpose (`caffeinate`, an `ffmpeg` render, a script outside an app); the T3 status
-  names it. `Modafinil --t3-activity` lists those jobs.
+  switch changed, any wake from sleep, or a remote Wake & Keep Awake), so a Mac switched on
+  again is never shut down just because T3 is idle. It also waits while a command-line
+  process holds a sleep assertion (anything run under `caffeinate -i`, for example); the T3
+  status names it and `Modafinil --t3-activity` lists them. A job that holds no assertion
+  (a render started with `nohup` or in `tmux` after its T3 thread finished, a plain
+  `ffmpeg` over SSH) is not seen and is ended by the shutdown: run such jobs under
+  `caffeinate -i` on a Mac that shuts down after T3.
 
 A shutdown asks every app to quit like ⌘Q, waits up to 30 seconds, then the helper runs
 `shutdown -h now`, which ends whatever is still open (unsaved work there is lost). Before
@@ -53,7 +56,9 @@ phone first, so the phone shows the shutdown as started.
 **A shut-down Mac stays off until someone presses its power button.** Apple silicon Macs
 do not start from Wake-on-LAN, so neither the iPad relay nor wake alarms can turn it on.
 Every shutdown control says so before it runs. Commands need protocol v8, which older
-phones and Macs do not send, so an older Companion can never shut a Mac down.
+phones and Macs do not send, so an older Companion can never shut a Mac down. An older
+phone or Mac (protocol v4–v7) shows a shutdown timer as a sleep timer; cancelling it there
+still cancels it. Another Mac shows this one as off only if it sent the shutdown itself.
 
 ## Sleep intent and quiet observers (Mac 0.12.1 / Companion 1.11)
 

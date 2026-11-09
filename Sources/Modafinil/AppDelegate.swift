@@ -273,6 +273,8 @@ final class AppDelegate: NSObject,
         companionServer?.ensureRunning()
         synchronizeSleepJournal()
         t3SleepWatch.reset()
+        // Whatever T3 did before this sleep does not count for a shutdown after it.
+        t3ShutdownGate.arm()
         checkShutdownTimer()
         defer {
             restoreKeepAwakeAfterT3SleepIfLidOpen()
@@ -1642,6 +1644,22 @@ final class AppDelegate: NSObject,
                 "The privileged helper is not enabled. Open Modafinil on the Mac to approve it.")))
             return
         }
+        // Nothing is quit unless the running helper can actually shut down.
+        helperClient.canShutDown { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .failure(let error): completion(.failure(error))
+            case .success:
+                guard self.shutdownProgress?.phase != .pending, !self.isQuitInProgress else {
+                    completion(.failure(CompanionRemoteError("The Mac is already shutting down.")))
+                    return
+                }
+                self.startShutdown(trigger: trigger, completion: completion)
+            }
+        }
+    }
+
+    private func startShutdown(trigger: String, completion: @escaping (Result<Void, Error>) -> Void) {
         let apps = NSWorkspace.shared.runningApplications.filter {
             $0.activationPolicy == .regular && $0.processIdentifier != getpid()
                 && $0.bundleIdentifier != "com.apple.finder" && !$0.isTerminated
@@ -1789,7 +1807,12 @@ final class AppDelegate: NSObject,
     }
 
     private func checkShutdownTimer() {
-        guard let schedule = shutdownSchedule, let boot = try? SystemSleepTimes.read().boot else { return }
+        guard let schedule = shutdownSchedule else { return }
+        guard let boot = try? SystemSleepTimes.read().boot else {
+            NSLog("Modafinil cannot read the boot time; checking the shutdown timer again in a minute")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in self?.checkShutdownTimer() }
+            return
+        }
         switch schedule.status(now: Date(), continuousNow: SystemSleepTimes.continuousTime, bootTime: boot) {
         case .waiting:
             armShutdownTimer()
@@ -1949,7 +1972,12 @@ final class AppDelegate: NSObject,
             t3ShutdownHold = nil
             beginT3WatchActivity()
         case .waitingForGrace(let sleepAt):
-            t3SleepAt = sleepAt
+            // A shutdown countdown is shown only if it would really fire.
+            if t3PowerAction == .shutdown, !t3ShutdownGate.allowsShutdown || !keepAwakeJobs().isEmpty {
+                t3SleepAt = nil
+            } else {
+                t3SleepAt = sleepAt
+            }
             beginT3WatchActivity()
         case .sleepNow where t3PowerAction == .shutdown:
             // Still finished after the grace period. Re-checked every 15 s until allowed.

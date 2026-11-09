@@ -135,6 +135,14 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         }
     }
 
+    fileprivate func canShutDown(withReply reply: @escaping (Bool, String?) -> Void) {
+        guard geteuid() == 0 else { reply(false, "The helper is not running as root."); return }
+        guard FileManager.default.isExecutableFile(atPath: "/sbin/shutdown") else {
+            reply(false, "/sbin/shutdown is missing."); return
+        }
+        reply(true, nil)
+    }
+
     fileprivate func shutDownNow(withReply reply: @escaping (Bool, String?) -> Void) {
         stateQueue.async {
             // A sleep request racing the shutdown would leave a sleeping, not an off, Mac.
@@ -365,6 +373,11 @@ private final class HelperSession: NSObject, ModafinilHelperProtocol {
 
     func requestTrackedSleep(withReply reply: @escaping (Bool, String?) -> Void) {
         sleepAfterDisablingSleepPrevention(withReply: reply)
+    }
+
+    func canShutDown(withReply reply: @escaping (Bool, String?) -> Void) {
+        guard let service else { reply(false, "The helper service is unavailable."); return }
+        service.canShutDown(withReply: reply)
     }
 
     func shutDownNow(withReply reply: @escaping (Bool, String?) -> Void) {

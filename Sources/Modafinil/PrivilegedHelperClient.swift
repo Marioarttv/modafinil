@@ -166,6 +166,29 @@ final class PrivilegedHelperClient {
         }
     }
 
+    func canShutDown(completion: @escaping (Result<Void, Error>) -> Void) {
+        var didComplete = false
+        let finish: (Result<Void, Error>) -> Void = { result in
+            DispatchQueue.main.async {
+                guard !didComplete else { return }
+                didComplete = true
+                completion(result)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + requestTimeout) {
+            finish(.failure(HelperError("The helper did not answer. Open Modafinil on this Mac so it updates its helper.")))
+        }
+        remoteProxy { result in
+            switch result {
+            case .failure: finish(.failure(HelperError("The helper on this Mac is out of date. Open Modafinil there so it updates its helper.")))
+            case .success(let proxy):
+                proxy.canShutDown { success, message in
+                    finish(success ? .success(()) : .failure(HelperError(message ?? "The helper cannot shut the Mac down.")))
+                }
+            }
+        }
+    }
+
     func shutDownNow(completion: @escaping (Result<Void, Error>) -> Void) {
         var didComplete = false
         let finish: (Result<Void, Error>) -> Void = { result in
