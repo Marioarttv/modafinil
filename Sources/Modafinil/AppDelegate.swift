@@ -1320,7 +1320,7 @@ final class AppDelegate: NSObject,
             t3Sleep: history != nil ? nil : makeRemoteT3Sleep(),
             sleepIntentActive: hasSleepIntent,
             scheduledAction: shutdownSchedule != nil ? .shutdown : nil,
-            shutdown: shutdownProgress
+            shutdown: reportedShutdown
         )
     }
 
@@ -1680,6 +1680,13 @@ final class AppDelegate: NSObject,
                 self.failShutdown("The Mac did not shut down: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// A failed shutdown is shown for 15 minutes; a pending one until the Mac is off.
+    private var reportedShutdown: RemoteShutdown? {
+        guard let progress = shutdownProgress else { return nil }
+        if progress.phase == .failed, Date().timeIntervalSince1970 - Double(progress.requestedAt) > 15 * 60 { return nil }
+        return progress
     }
 
     private func failShutdown(_ detail: String) {
@@ -2291,7 +2298,7 @@ final class AppDelegate: NSObject,
         snapshot.isHelperEnabled = helperStatus == .enabled
         snapshot.scheduledSleepDate = shutdownSchedule?.date ?? scheduledSleepDate
         snapshot.isShutdownScheduled = shutdownSchedule != nil
-        snapshot.shutdownProgress = shutdownProgress
+        snapshot.shutdownProgress = reportedShutdown
         snapshot.t3PowerAction = t3PowerAction
         snapshot.keepAwakeJobs = keepAwakeJobs().map(\.title)
         snapshot.scheduledWakeDate = scheduledWakeDate
