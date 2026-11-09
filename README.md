@@ -36,7 +36,7 @@ Modafinil can turn a Mac off completely, from the iPhone, from another Mac
 - **Shut Down Now** (iPhone, Other Macs, `Modafinil --remote-mac shutdown <name> --yes`).
 - **Shutdown timer**: the timer card's *Sleep / Shut Down* choice. One power-down timer
   at a time; a shutdown timer replaces a sleep timer and the other way round. It belongs to
-  the current boot, is cancelled by quitting Modafinil, and never fires late: a Mac that
+  the current boot, is cancelled by quitting Modafinil or logging out, and never fires late: a Mac that
   slept through the time stays on.
 - **When T3 Code finishes: Shut Down**: the T3 rule's *Then* choice. It shuts down only after
   a T3 run has finished since the rule was armed (Modafinil started, the choice or the

@@ -61,8 +61,25 @@ final class ShutdownPlanningTests: XCTestCase {
         XCTAssertEqual(jobs.last?.title, "caffeinate (for zsh, pid 3002)")
     }
 
-    func testT3ShutdownNeedsWorkSinceArming() {
+    func testAfterLaunchOnlyANewRunCounts() {
+        // Power-on: threads cut off by the shutdown still read as working in T3's database.
         var gate = T3ShutdownGate(armedAt: now)
+        gate.note(.busy([T3ActiveThread(title: "Stale", status: "running")]))
+        gate.note(.unavailable("locked"))
+        XCTAssertFalse(gate.allowsShutdown)
+        XCTAssertEqual(gate.decide(keepAwakeJobs: [], isShuttingDown: false), .hold(nil))
+        gate.noteLatestRun(requestedAt: now.addingTimeInterval(30))
+        XCTAssertTrue(gate.allowsShutdown)
+        XCTAssertEqual(gate.decide(keepAwakeJobs: [], isShuttingDown: false), .shutDown)
+        XCTAssertEqual(gate.decide(keepAwakeJobs: ["caffeinate (for zsh, pid 3)"], isShuttingDown: false),
+                       .hold("waiting for caffeinate (for zsh, pid 3) to finish"))
+        XCTAssertEqual(gate.decide(keepAwakeJobs: [], isShuttingDown: true), .hold(nil))
+        gate.arm(at: now.addingTimeInterval(60)) // a failed shutdown or a wake
+        XCTAssertEqual(gate.decide(keepAwakeJobs: [], isShuttingDown: false), .hold(nil))
+    }
+
+    func testT3ShutdownNeedsWorkSinceArming() {
+        var gate = T3ShutdownGate(armedAt: now, requiresNewRun: false)
         XCTAssertFalse(gate.allowsShutdown)
         gate.noteLatestRun(requestedAt: now.addingTimeInterval(-60)) // a run from before arming
         XCTAssertFalse(gate.allowsShutdown)

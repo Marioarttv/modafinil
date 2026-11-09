@@ -387,9 +387,17 @@ public struct T3SleepWatch {
 public struct T3ShutdownGate: Equatable {
     public private(set) var armedAt: Date
     public private(set) var sawWork = false
+    /// After a launch (a boot, usually), threads cut off by the last shutdown can still
+    /// read as working until T3 tidies them up: only a run requested since counts.
+    public private(set) var requiresNewRun: Bool
 
-    public init(armedAt: Date = Date()) { self.armedAt = armedAt }
+    /// The app's launch: needs a run requested after it.
+    public init(armedAt: Date = Date(), requiresNewRun: Bool = true) {
+        self.armedAt = armedAt
+        self.requiresNewRun = requiresNewRun
+    }
 
+    /// A setting change, wake or remote wake: T3 seen working from now on counts.
     public mutating func arm(at date: Date = Date()) {
         armedAt = date
         sawWork = false
@@ -398,13 +406,30 @@ public struct T3ShutdownGate: Equatable {
     /// T3 was seen working (or waiting) at a check after arming. An unreadable database
     /// counts as busy for sleeping, but never as proof that T3 worked.
     public mutating func note(_ activity: T3Activity?) {
+        guard !requiresNewRun else { return }
         if case .busy(let threads)? = activity, !threads.isEmpty { sawWork = true }
     }
 
     /// A run requested after arming counts even if it ended between two checks.
     public mutating func noteLatestRun(requestedAt date: Date?) {
-        if let date, date > armedAt { sawWork = true }
+        if let date, date > armedAt { sawWork = true; requiresNewRun = false }
     }
 
     public var allowsShutdown: Bool { sawWork }
+
+    public enum Decision: Equatable {
+        case shutDown
+        /// Not yet; the text (if any) says why, for the T3 status line.
+        case hold(String?)
+    }
+
+    /// The final check once T3 has stayed finished through the grace period.
+    public func decide(keepAwakeJobs: [String], isShuttingDown: Bool) -> Decision {
+        if isShuttingDown { return .hold(nil) }
+        guard allowsShutdown else { return .hold(nil) }
+        guard keepAwakeJobs.isEmpty else {
+            return .hold("waiting for \(keepAwakeJobs.prefix(2).joined(separator: ", ")) to finish")
+        }
+        return .shutDown
+    }
 }

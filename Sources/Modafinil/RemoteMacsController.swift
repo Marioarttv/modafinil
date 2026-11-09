@@ -309,7 +309,8 @@ final class RemoteMacsController: ObservableObject {
             mac.protocolVersion = response.version
             mac.scheduledAction = state.scheduledAction
             mac.shutdown = state.shutdown
-            Self.setShutDownAt(id, state.shutdown?.phase == .pending ? Date() : nil)
+            Self.setShutDownAt(id, state.shutdown.flatMap { $0.phase == .pending
+                ? Date(timeIntervalSince1970: TimeInterval($0.requestedAt)) : nil })
             if state.shutdown?.phase == .pending { mac.phase = .shuttingDown }
             else if state.sleepPreventionEffective { mac.phase = .awake }
             else if state.sleepIntentActive == true || state.sleepAttempt?.phase == .pending { mac.phase = .sleepRequested }

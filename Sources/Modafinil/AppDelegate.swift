@@ -201,6 +201,8 @@ final class AppDelegate: NSObject,
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         releaseRemoteUserActivity()
+        // A logout ends Modafinil too; a shutdown timer never outlives the app's session.
+        if shutdownSchedule != nil { setShutdownSchedule(nil) }
         historyRecorder.recordAppStop()
         powerMonitor.stop()
         if let journalNotifyToken { notify_cancel(journalNotifyToken) }
@@ -1983,15 +1985,14 @@ final class AppDelegate: NSObject,
             // Still finished after the grace period. Re-checked every 15 s until allowed.
             t3SleepAt = nil
             let previousHold = t3ShutdownHold
-            let jobs = keepAwakeJobs()
-            if !t3ShutdownGate.allowsShutdown {
-                t3ShutdownHold = nil
-            } else if !jobs.isEmpty {
-                t3ShutdownHold = "waiting for \(jobs.prefix(2).map(\.title).joined(separator: ", ")) to finish"
-                if previousHold != t3ShutdownHold {
-                    historyRecorder.note("Shutdown after T3 Code finished: \(t3ShutdownHold!)")
+            switch t3ShutdownGate.decide(keepAwakeJobs: keepAwakeJobs().map(\.title),
+                                         isShuttingDown: shutdownProgress?.phase == .pending) {
+            case .hold(let reason):
+                t3ShutdownHold = reason
+                if let reason, previousHold != reason {
+                    historyRecorder.note("Shutdown after T3 Code finished: \(reason)")
                 }
-            } else if shutdownProgress?.phase != .pending {
+            case .shutDown:
                 t3ShutdownHold = nil
                 t3SleepWatch.reset()
                 endT3WatchActivity()
