@@ -395,8 +395,11 @@ public struct T3ShutdownGate: Equatable {
         sawWork = false
     }
 
-    /// T3 was seen working (or waiting) at a check after arming.
-    public mutating func noteBusy() { sawWork = true }
+    /// T3 was seen working (or waiting) at a check after arming. An unreadable database
+    /// counts as busy for sleeping, but never as proof that T3 worked.
+    public mutating func note(_ activity: T3Activity?) {
+        if case .busy(let threads)? = activity, !threads.isEmpty { sawWork = true }
+    }
 
     /// A run requested after arming counts even if it ended between two checks.
     public mutating func noteLatestRun(requestedAt date: Date?) {

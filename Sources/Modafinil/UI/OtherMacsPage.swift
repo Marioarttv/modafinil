@@ -14,6 +14,7 @@ extension RemoteMacsController.Phase {
         case .unreachable: return "Asleep or unreachable"
         case .working(let message): return message
         case .failed: return "Could not complete the request"
+        case .shuttingDown: return "Shutting down · apps are quitting"
         case .off(let date): return "Shut down at \(UIFormat.time(date)) · press its power button to turn it on"
         }
     }
@@ -28,6 +29,7 @@ extension RemoteMacsController.Phase {
         case .unreachable: return "Asleep"
         case .working(let message): return message
         case .failed: return "Error"
+        case .shuttingDown: return "Shutting down"
         case .off: return "Off"
         }
     }
@@ -40,10 +42,12 @@ extension RemoteMacsController.Phase {
         case .checking, .working: return .blue
         case .failed: return .orange
         case .unknown, .off: return .secondary
+        case .shuttingDown: return .orange
         }
     }
 
-    var isOff: Bool { if case .off = self { return true } else { return false } }
+    /// Off, or on its way: shutdown controls and wake are pointless.
+    var isOff: Bool { isOffOrShuttingDown }
 
     var symbol: String {
         switch self {
@@ -53,7 +57,7 @@ extension RemoteMacsController.Phase {
         case .checking, .working: return "arrow.triangle.2.circlepath"
         case .failed: return "exclamationmark.triangle.fill"
         case .unknown: return "desktopcomputer"
-        case .off: return "power.circle"
+        case .off, .shuttingDown: return "power.circle"
         }
     }
 }

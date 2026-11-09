@@ -20,8 +20,17 @@ final class RemoteMacsController: ObservableObject {
         case unreachable
         case working(String)
         case failed(String)
-        /// Shut down from here, the iPhone or a timer. Stays off until its power button.
+        /// It accepted a shutdown; a check about a minute later confirms it is gone.
+        case shuttingDown
+        /// Accepted a shutdown and stopped answering. Stays off until its power button.
         case off(Date)
+
+        var isOffOrShuttingDown: Bool {
+            switch self {
+            case .off, .shuttingDown: return true
+            default: return false
+            }
+        }
 
         var isBusy: Bool {
             switch self {
@@ -85,7 +94,7 @@ final class RemoteMacsController: ObservableObject {
 
     private func allowsAutomaticContact(_ mac: Mac) -> Bool {
         if mac.phase == .sleepRequested { return false }
-        if case .off = mac.phase { return false }
+        if case .off = mac.phase { return false }  // a shutting-down Mac may still be checked
         let url = RemotePowerNotices.directory.appendingPathComponent(mac.configuration.macHost + ".json")
         if let data = try? Data(contentsOf: url),
            let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -100,7 +109,7 @@ final class RemoteMacsController: ObservableObject {
             values[mac.id] = sleeping ? Date().timeIntervalSince1970 : nil
             UserDefaults.standard.set(values, forKey: "remoteMacSleepQuietAfter")
             // A push changes policy, not our knowledge of the physical power state.
-            if case .off = mac.phase { continue }
+            if mac.phase.isOffOrShuttingDown { continue }
             if sleeping, !mac.phase.isBusy { update(mac.id) { $0.phase = .sleepRequested } }
             if !sleeping, mac.phase == .sleepRequested { update(mac.id) { $0.phase = .unknown } }
         }
@@ -301,10 +310,23 @@ final class RemoteMacsController: ObservableObject {
             mac.scheduledAction = state.scheduledAction
             mac.shutdown = state.shutdown
             Self.setShutDownAt(id, state.shutdown?.phase == .pending ? Date() : nil)
-            if state.shutdown?.phase == .pending { mac.phase = .off(Date()) }
+            if state.shutdown?.phase == .pending { mac.phase = .shuttingDown }
             else if state.sleepPreventionEffective { mac.phase = .awake }
             else if state.sleepIntentActive == true || state.sleepAttempt?.phase == .pending { mac.phase = .sleepRequested }
             else { mac.phase = .reachable }
+        }
+        if state.shutdown?.phase == .pending { verifyShutdown(id) }
+    }
+
+    /// Checks again after the Mac's ~30 s app-quit wait (and once more after its 3-minute
+    /// watchdog), so a failed shutdown is seen instead of assumed off.
+    private func verifyShutdown(_ id: String, attempt: Int = 0) {
+        let delay: UInt64 = attempt == 0 ? 75 : 150
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+            guard let self, self.mac(id)?.phase == .shuttingDown else { return }
+            await self.refresh(id)
+            if self.mac(id)?.phase == .shuttingDown, attempt == 0 { self.verifyShutdown(id, attempt: 1) }
         }
     }
 

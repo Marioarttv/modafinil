@@ -152,7 +152,7 @@ enum CompanionCommandLine {
             switch phase {
             case .failed: code = 1
             case .unreachable: code = action == "sleep" ? 0 : 3
-            case .off: code = action == "shutdown" ? 0 : 3
+            case .off, .shuttingDown: code = action == "shutdown" ? 0 : 3
             default: code = 0
             }
             done.signal()

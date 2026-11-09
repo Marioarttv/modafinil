@@ -72,7 +72,12 @@ final class ShutdownPlanningTests: XCTestCase {
         XCTAssertTrue(gate.allowsShutdown)
         gate.arm(at: now.addingTimeInterval(100)) // e.g. a remote wake
         XCTAssertFalse(gate.allowsShutdown)
-        gate.noteBusy()
+        gate.note(.unavailable("database is locked")) // read errors are not work
+        gate.note(.idle)
+        gate.note(.notRunning)
+        gate.note(.busy([]))
+        XCTAssertFalse(gate.allowsShutdown)
+        gate.note(.busy([T3ActiveThread(title: "Render", status: "running")]))
         XCTAssertTrue(gate.allowsShutdown)
     }
 }
