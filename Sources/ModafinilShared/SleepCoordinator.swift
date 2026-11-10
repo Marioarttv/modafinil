@@ -412,7 +412,7 @@ public final class SleepCoordinator {
             journal.attempt?.detail = "The return to sleep was called off: a job that keeps the Mac awake started."
         }
         recordPowerEvent(PowerEvent(kind: .note, at: now().timeIntervalSince1970,
-            note: "Stayed awake after a background wake: a job that keeps the Mac awake started"))
+            note: "Stopped returning to sleep: a job that keeps the Mac awake started during a background wake"))
         try persist()
         return true
     }
