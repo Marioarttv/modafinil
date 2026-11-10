@@ -13,7 +13,7 @@ import ModafinilT3
 ///     Modafinil --remote-mac-list
 ///     Modafinil --remote-mac status|wake|sleep|t3sleep-on|t3sleep-off <name or address>
 ///     Modafinil --remote-mac t3action-sleep|t3action-shutdown <name or address>
-///     Modafinil --remote-mac shutdown <name or address> --yes   # off until its power button
+///     Modafinil --remote-mac shutdown <name or address> --yes   # off until its wake alarm or power button
 ///     Modafinil --t3-activity                       # what "Sleep when T3 finishes" counts here
 ///     Modafinil --install-helper                    # register the helper; approve it in Login Items
 ///
@@ -67,7 +67,7 @@ enum CompanionCommandLine {
         case "--remote-mac":
             if rest.first == "shutdown" {
                 guard rest.count == 3, rest[2] == "--yes" else {
-                    return fail("Usage: --remote-mac shutdown <name or address> --yes\nThe Mac stays off until someone presses its power button.")
+                    return fail("Usage: --remote-mac shutdown <name or address> --yes\nThe Mac stays off until a wake alarm set before, or its power button.")
                 }
                 return runRemoteMacCommand("shutdown", target: rest[1])
             }

@@ -20,8 +20,20 @@ final class WakeSchedulerTests: XCTestCase {
         }
     }
 
-    private func event(_ delay: TimeInterval, owner: String = WakeScheduler.owner, type: String = "wake") -> ScheduledPowerEvent {
+    private func event(_ delay: TimeInterval, owner: String = WakeScheduler.owner, type: String = WakeScheduler.eventType) -> ScheduledPowerEvent {
         ScheduledPowerEvent(date: now.addingTimeInterval(delay), owner: owner, type: type)
+    }
+
+    func testAlarmAlsoStartsAShutDownMacAndReplacesAWakeOnlyAlarmFromAnOlderVersion() throws {
+        XCTAssertEqual(WakeScheduler.eventType, "wakepoweron") // pmset calls it wakeorpoweron
+        let backend = Backend()
+        backend.events = [event(120, type: "wake")]
+        XCTAssertEqual(backend.scheduler.scheduledDate(now: now), now.addingTimeInterval(120))
+        try backend.scheduler.schedule(now.addingTimeInterval(120), now: now)
+        XCTAssertEqual(backend.events, [event(120)])
+        backend.events = [event(300, type: "wake")]
+        try backend.scheduler.cancel(now: now)
+        XCTAssertEqual(backend.events, [])
     }
 
     func testReplaceAndCancelPreserveOtherAppsAndOtherEventTypes() throws {

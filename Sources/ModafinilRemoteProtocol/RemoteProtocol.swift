@@ -15,8 +15,8 @@ public enum RemoteCommand: String, Codable, Sendable {
     case history
     /// Protocol v6: argument "1" turns "Sleep when T3 Code threads finish" on, "0" off.
     case setT3Sleep
-    /// Protocol v8: shut the Mac down now. Argument "". It stays off until someone
-    /// presses its power button; Wake-on-LAN and wake alarms cannot start it.
+    /// Protocol v8: shut the Mac down now. Argument "". It stays off until a wake alarm
+    /// set before the shutdown (Mac 0.14.0) or its power button; Wake-on-LAN cannot start it.
     case shutdown
     /// Protocol v8: shut down after this many seconds (60 to 86 400). Replaces a sleep
     /// timer; `cancelScheduledSleep` cancels either kind.

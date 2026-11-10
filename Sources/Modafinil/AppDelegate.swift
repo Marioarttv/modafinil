@@ -1037,7 +1037,7 @@ final class AppDelegate: NSObject,
             beginShutdown(trigger: "iPhone") { [weak self] result in
                 guard let self else { return }
                 completion(result.map { (self.makeRemoteState(),
-                    "Shutting down. Apps are quitting; the Mac turns off within about a minute. Press its power button to turn it on again.") })
+                    "Shutting down. Apps are quitting; the Mac turns off within about a minute. It starts again at its wake alarm, if one is set, or with its power button.") })
             }
         case .scheduleShutdown:
             scheduleShutdown(argument: argument, source: "iPhone", completion: completion)

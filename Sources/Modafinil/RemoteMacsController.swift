@@ -22,7 +22,7 @@ final class RemoteMacsController: ObservableObject {
         case failed(String)
         /// It accepted a shutdown; a check about a minute later confirms it is gone.
         case shuttingDown
-        /// Accepted a shutdown and stopped answering. Stays off until its power button.
+        /// Accepted a shutdown and stopped answering. Stays off until its wake alarm or power button.
         case off(Date)
 
         var isOffOrShuttingDown: Bool {

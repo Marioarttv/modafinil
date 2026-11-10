@@ -83,6 +83,8 @@ What 0.14.0 does:
   ends it; launchd starts a new one for the next connection. On the Mac mini this halved
   each background wake (about 55 s to 28 s).
 
+- **The wake alarm also starts a shut-down Mac** (see Remote shutdown below).
+
 The phone needs no update: protocol and pairing are unchanged.
 
 Limits: macOS still wakes a sleeping Mac in the background (maintenance, network); those
@@ -118,9 +120,14 @@ A shutdown asks every app to quit like ⌘Q, waits up to 30 seconds, then the he
 that, Macs that mount this one get the usual sleep notice and unmount. The Mac answers the
 phone first, so the phone shows the shutdown as started.
 
-**A shut-down Mac stays off until someone presses its power button.** Apple silicon Macs
-do not start from Wake-on-LAN, so neither the iPad relay nor wake alarms can turn it on.
-Every shutdown control says so before it runs. Commands need protocol v8, which older
+**A shut-down Mac stays off until its wake alarm or its power button.** Apple silicon Macs
+do not start from Wake-on-LAN, so the iPad relay cannot turn it on. Since Mac 0.14.0 the
+wake alarm (**Wake At…** on the iPhone, **Wake Timer** on the Mac) is a "wake or power on"
+event: set before the shutdown, it starts the Mac again at that time, and Modafinil turns
+keep-awake on as after any wake alarm. Checked on the Mac mini on 2026-11-10 (shut down
+22:47, started by the scheduled event 22:57). It needs mains power; a Mac with FileVault
+stops at its login screen. Without an alarm someone has to press the power button, and
+every shutdown control says so before it runs. Commands need protocol v8, which older
 phones and Macs do not send, so an older Companion can never shut a Mac down. An older
 phone or Mac (protocol v4–v7) shows a shutdown timer as a sleep timer; cancelling it there
 still cancels it. Another Mac shows this one as off only if it sent the shutdown itself.
