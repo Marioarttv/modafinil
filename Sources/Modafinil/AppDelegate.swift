@@ -661,7 +661,16 @@ final class AppDelegate: NSObject,
                 return
             }
             // Once the helper is unregistered nothing could switch sleep blockers back on.
-            self.helperClient.confirmSleepBlockersRestored(completion: completion)
+            // No marker: no sleep left any switched off, and an older helper is not asked.
+            guard FileManager.default.fileExists(atPath: SleepEnforcement.defaultMarkerURL.path) else {
+                completion(.success(()))
+                return
+            }
+            self.helperClient.confirmSleepBlockersRestored { result in
+                completion(result.mapError { error in
+                    SleepRestoreError("\(error.localizedDescription) Restart the Mac (that restores them), then uninstall again.")
+                })
+            }
         }
     }
 
@@ -1550,8 +1559,13 @@ final class AppDelegate: NSObject,
             armScheduledWakeTimer()
             // An alarm saved by 0.13.0 only wakes. Saving it again makes it a
             // wake-or-power-on event (the helper replaces its own older event).
-            if let date = scheduledWakeDate, date.timeIntervalSinceNow > 90, helperStatus == .enabled {
-                helperClient.setScheduledWake(date.timeIntervalSince1970) { _ in }
+            // The scheduler accepts nothing closer than a minute.
+            if let date = scheduledWakeDate, date.timeIntervalSinceNow > 65, helperStatus == .enabled {
+                helperClient.setScheduledWake(date.timeIntervalSince1970) { result in
+                    if case .failure(let error) = result {
+                        NSLog("Modafinil could not save the wake alarm again as a power-on event: \(error.localizedDescription)")
+                    }
+                }
             }
         }
     }

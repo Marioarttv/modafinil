@@ -44,8 +44,9 @@ public struct SleepIntent: Codable, Equatable {
     public var lastWake: TimeInterval
     public var returnAfter: TimeInterval?
     public var returns: [TimeInterval] = []
-    /// Keep-awake jobs someone had started when sleep was requested, with their parent
-    /// processes. The request overrode those. Saved, so a restarted helper still knows.
+    /// Keep-awake jobs someone had started when sleep was requested, with the parent
+    /// processes of their own session (their script). The request overrode those.
+    /// Saved, so a restarted helper still knows.
     public var knownJobs: [Int32]? = nil
 }
 
@@ -125,8 +126,8 @@ public final class SleepCoordinator {
     private let userIdle: () -> TimeInterval?
     private let backgroundWakeBegan: () -> Void
     private let backgroundWakeSettled: () -> Void
-    /// Command-line jobs someone started that ask macOS to stay awake: process → its
-    /// parent processes.
+    /// Command-line jobs someone started that ask macOS to stay awake: process → the
+    /// parent processes inside its own session (not the session's host).
     private let keepAwakeJobs: () -> [Int32: Set<Int32>]
     private var lastUserIdle: TimeInterval?
     /// Input right after Sleep Now on this Mac is the click that asked for it.
@@ -355,7 +356,13 @@ public final class SleepCoordinator {
             if journal.attempt != attempt { journal.attempt = attempt; try persist() }
             // Only when there is something to clear: the helper ticks for good now, and
             // an old failed receipt must not be rewritten every five seconds.
-            if attempt.phase == .failed, journal.intent != nil { journal.intent = nil; try persist() }
+            // A failed return to sleep after a background wake keeps the intent: a Power
+            // Nap task (a backup) can hold that wake for minutes, and macOS sleeps by
+            // itself when it ends, which it could not if the blockers counted again.
+            if attempt.phase == .failed, journal.intent != nil, attempt.trigger != "sleep intent" {
+                journal.intent = nil
+                try persist()
+            }
             try maintainIntent(times: times, time: time)
         } catch {
             journal.intent = nil

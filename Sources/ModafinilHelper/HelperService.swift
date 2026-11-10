@@ -46,8 +46,7 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
             var jobs: [Int32: Set<Int32>] = [:]
             for job in KeepAwakeJobs.find(assertions: SleepBlockers.readAssertions(), effects: [.systemSleep],
                                           isRegularApp: { _ in false }) {
-                let parents = HelperService.ancestors(of: job.pid)
-                if HelperService.wasStartedBySomeone(job.pid, parents: parents) { jobs[job.pid] = Set(parents) }
+                if let script = HelperService.scriptFamily(of: job.pid) { jobs[job.pid] = script }
             }
             return jobs
         }, backgroundWakeBegan: { [unowned self] in self.holdBackgroundWake() },
@@ -63,6 +62,13 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         super.init()
         listener.delegate = self
         performStartupCleanup()
+        // A wake too short for the 40-second step, or a client that reconnected after it:
+        // File Sharing also lets go at the moment an intended sleep begins again.
+        powerMonitor.onWillSleep = { [weak self] in
+            guard let self, self.sleepCoordinator.journal.intent != nil,
+                  self.sleepCoordinator.journal.attempt?.phase != .pending else { return }
+            self.endFileSharingDaemon()
+        }
         powerMonitor.onDidWake = { [weak self] in
             guard let self else { return }
             self.sleepCoordinator.tick()
@@ -278,26 +284,16 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         wakeHoldAssertion = 0
     }
 
-    /// The parent processes of `pid`, nearest first, without launchd.
-    static func ancestors(of pid: Int32) -> [Int32] {
-        var chain: [Int32] = []
-        var current = pid
-        while chain.count < 24, let parent = SleepBlockerApps.parentPID(current), parent > 1, parent != current {
-            chain.append(parent)
-            current = parent
-        }
-        return chain
+    static func scriptFamily(of pid: Int32) -> Set<Int32>? {
+        KeepAwakeJobs.scriptFamily(of: pid, parent: SleepBlockerApps.parentPID, name: SleepBlockers.processName,
+                                   path: KeepAwakeJobs.executablePath, hasTerminal: hasControllingTerminal)
     }
 
-    /// Over SSH, in tmux or screen, or from a terminal window: the process has a
-    /// controlling terminal or a remote-login parent. A launchd job has neither.
-    static func wasStartedBySomeone(_ pid: Int32, parents: [Int32]) -> Bool {
+    static func hasControllingTerminal(_ pid: Int32) -> Bool {
         var info = kinfo_proc()
         var size = MemoryLayout<kinfo_proc>.stride
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
-        if sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0, info.kp_eproc.e_tdev != -1 { return true }
-        let sessionHosts: Set<String> = ["sshd", "sshd-session", "tmux", "screen", "login"]
-        return parents.contains { sessionHosts.contains(SleepBlockers.processName(for: $0)) }
+        return sysctl(&mib, 4, &info, &size, nil, 0) == 0 && size > 0 && info.kp_eproc.e_tdev != -1
     }
 
     /// After a background wake of an intended sleep, macOS goes back to sleep by itself

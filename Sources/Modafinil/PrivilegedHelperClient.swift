@@ -116,13 +116,16 @@ final class PrivilegedHelperClient {
         var didComplete = false
         let finish: (Bool) -> Void = { retired in
             DispatchQueue.main.async {
+                // Also for an answer that comes after the timeout: the connection leads
+                // to a helper that is exiting.
+                if retired { self.invalidate() }
                 guard !didComplete else { return }
                 didComplete = true
-                if retired { self.invalidate() }
                 completion(retired)
             }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { finish(false) }
+        // A helper that has just started (login) runs its own clean-up first.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { finish(false) }
         remoteProxy { result in
             switch result {
             case .failure: finish(false)

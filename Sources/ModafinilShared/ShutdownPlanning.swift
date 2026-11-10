@@ -127,6 +127,28 @@ public enum KeepAwakeJobs {
         return jobs.values.sorted { $0.pid < $1.pid }
     }
 
+    public static let sessionHosts: Set<String> = ["sshd", "sshd-session", "tmux", "screen", "login"]
+
+    /// For a job a person or an agent started: its parent processes up to, but without,
+    /// the host of its session (sshd, tmux, screen, login, or an app such as Terminal or
+    /// T3 Code). Those parents are "the script" the job belongs to: its next step shares
+    /// them, a job in another tmux window or SSH login does not. Nil for a job nobody
+    /// started: its parents lead to launchd without a session host and it has no
+    /// terminal (a launchd job, a daemon). A job detached with nohup has lost its
+    /// session host and is not recognised either.
+    public static func scriptFamily(of pid: Int32, parent: (Int32) -> Int32?, name: (Int32) -> String,
+                                    path: (Int32) -> String?, hasTerminal: (Int32) -> Bool) -> Set<Int32>? {
+        var family: Set<Int32> = []
+        var current = pid
+        for _ in 0..<24 {
+            guard let next = parent(current), next > 1, next != current else { break }
+            if sessionHosts.contains(name(next)) || path(next)?.contains(".app/") == true { return family }
+            family.insert(next)
+            current = next
+        }
+        return hasTerminal(pid) ? family : nil
+    }
+
     public static func executablePath(_ pid: Int32) -> String? {
         var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
         let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))

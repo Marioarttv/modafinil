@@ -215,6 +215,29 @@ final class HardSleepCoordinatorTests: XCTestCase {
         XCTAssertEqual(f.requests, 2) // back to sleep as asked
     }
 
+    func testAJobInAnotherTmuxWindowOrSSHLoginIsNew() throws {
+        // Families stop below the session host, so two windows share nothing.
+        let f = Fixture(); f.jobs = [41: [40]] // window 1: shell 40 runs caffeinate 41
+        try f.start(); f.sleepAndWake()
+        f.jobs = [41: [40], 61: [60]] // window 2: shell 60 starts caffeinate 61
+        f.advance(1)
+        XCTAssertNil(f.engine.journal.intent)
+    }
+
+    func testAFailedReturnToSleepKeepsTheIntentAndTheBlockersOff() throws {
+        // A Power Nap task holds the background wake for minutes.
+        let f = Fixture(); try f.start(); f.sleepAndWake()
+        f.advance(90); f.advance(2)
+        XCTAssertEqual(f.engine.journal.attempt?.trigger, "sleep intent")
+        f.advance(130)
+        XCTAssertEqual(f.engine.journal.attempt?.phase, .failed)
+        XCTAssertNotNil(f.engine.journal.intent)
+        XCTAssertTrue(f.engine.wantsSleepEnforcement)
+        // macOS sleeps by itself once the task ends; the intent carries on from there.
+        f.sleepAndWake()
+        XCTAssertNotNil(f.engine.journal.intent?.returnAfter)
+    }
+
     func testARestartedHelperStillKnowsWhichJobsTheRequestOverrode() throws {
         let f = Fixture(); f.jobs = [41: [40]]
         try f.start(); f.sleepAndWake()
@@ -368,6 +391,35 @@ final class HiddenSleepTests: XCTestCase {
 }
 
 final class KeepAwakeJobEffectTests: XCTestCase {
+    /// pid → (parent, name, path, has a terminal)
+    private func family(_ pid: Int32, _ table: [Int32: (Int32, String, String, Bool)]) -> Set<Int32>? {
+        KeepAwakeJobs.scriptFamily(of: pid, parent: { table[$0]?.0 }, name: { table[$0]?.1 ?? "" },
+                                   path: { table[$0]?.2 }, hasTerminal: { table[$0]?.3 ?? false })
+    }
+
+    func testAScriptFamilyStopsBelowItsSessionHost() {
+        let table: [Int32: (Int32, String, String, Bool)] = [
+            // launchd(1) → sshd(10) → sshd-session(11) → zsh(12) → caffeinate(13)
+            10: (1, "sshd", "/usr/sbin/sshd", false), 11: (10, "sshd-session", "/usr/libexec/sshd-session", false),
+            12: (11, "zsh", "/bin/zsh", false), 13: (12, "caffeinate", "/usr/bin/caffeinate", false),
+            // tmux(20) → zsh(21) → caffeinate(22); zsh(23) → caffeinate(24)
+            20: (1, "tmux", "/opt/homebrew/bin/tmux", false), 21: (20, "zsh", "/bin/zsh", true),
+            22: (21, "caffeinate", "/usr/bin/caffeinate", true), 23: (20, "zsh", "/bin/zsh", true),
+            24: (23, "caffeinate", "/usr/bin/caffeinate", true),
+            // T3 Code(30) → node(31) → zsh(32) → caffeinate(33): an agent's command, no terminal
+            30: (1, "T3 Code", "/Applications/T3 Code.app/Contents/MacOS/T3 Code", false),
+            31: (30, "node", "/Applications/T3 Code.app/Contents/Resources/node", false),
+            32: (31, "zsh", "/bin/zsh", false), 33: (32, "caffeinate", "/usr/bin/caffeinate", false),
+            // launchd → zsh(40) → caffeinate(41): a login agent's script
+            40: (1, "zsh", "/bin/zsh", false), 41: (40, "caffeinate", "/usr/bin/caffeinate", false),
+        ]
+        XCTAssertEqual(family(13, table), [12])
+        XCTAssertEqual(family(22, table), [21])
+        XCTAssertEqual(family(24, table), [23]) // another tmux window: nothing shared
+        XCTAssertEqual(family(33, table), [32]) // stops below the app's own processes
+        XCTAssertNil(family(41, table)) // nobody started it
+    }
+
     func testOnlySystemSleepJobsHoldAnAutomaticSleep() {
         let assertions = [
             SleepBlockers.Assertion(pid: 10, processName: "caffeinate", type: "PreventSystemSleep", name: "caffeinate"),

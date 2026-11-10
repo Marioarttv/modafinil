@@ -52,7 +52,8 @@ What 0.14.0 does:
   assertions simply do not count while the Mac is meant to sleep. A wake you asked for
   (Wake & Keep Awake, the keyboard or mouse, the lid), a failed request, or quitting
   Modafinil switches them back on; the helper retries by itself if that fails, and an
-  uninstall stops with a message until it has worked. powerd counts disables and forgets
+  uninstall stops with a message until it has worked (a restart of the Mac always restores
+  them). powerd counts disables and forgets
   them when it restarts, so the helper enables a type once before each disable (the count
   is then exactly one, whatever a crash or a powerd restart left behind; if the enable
   fails, the disable waits), does so again for every sleep attempt, and keeps
@@ -62,8 +63,11 @@ What 0.14.0 does:
   when you asked for sleep are overridden. If someone then starts a command-line job that
   asks macOS to stay awake (`caffeinate -s` over SSH, in tmux or in a terminal) during a
   later background wake, the sleep intent ends, the blockers count again and the Mac stays
-  awake for it. The next step of a script that was already running, and anything a
-  launchd job or a daemon starts on its own, does not count.
+  awake for it. So does a job an agent starts from an app such as T3 Code. What does not
+  count: the next step of a script whose job was holding the Mac awake at the request
+  (same parent processes below the SSH login, tmux window or app), anything a launchd job
+  or a daemon starts on its own, and a job detached with `nohup … &` (it no longer belongs
+  to a session).
 - **Time for the phone after a wake.** With nothing holding it, macOS ends a background
   wake after about 25 seconds. On mains power the helper holds each background wake of an
   intended sleep open for 45 seconds so Wake & Keep Awake can arrive over Wi-Fi and
@@ -107,8 +111,12 @@ What 0.14.0 does:
   launchd starts a new one for the next connection. A running `smbd` never answers
   macOS's sleep notification, so every return to sleep waited out its 28-second timeout
   (macOS 27.2), and a client that is still connected (the other Mac's unmount can come
-  minutes late) woke the Mac again ten seconds after every sleep. That session cannot
-  outlive the sleep anyway.
+  minutes late) woke the Mac again ten seconds after every sleep. The helper does the same
+  at the moment an intended sleep begins again. A file transfer to or from this Mac that
+  is running during such a background wake is cut; its session could not outlive the
+  sleep anyway. If a failed return to sleep follows a background wake (a Power Nap backup
+  can hold one for minutes), the intent and the override stay, and macOS sleeps when the
+  task ends.
 - **The wake alarm also starts a shut-down Mac** (see Remote shutdown below).
 
 The phone needs no update: protocol and pairing are unchanged.
