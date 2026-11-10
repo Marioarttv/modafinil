@@ -28,6 +28,61 @@ Opening Modafinil from Launchpad or Finder shows the same controls in a regular 
 
 The menu also includes "Sleep When T3 Threads Finish (Lid Closed)", described below, and an "Only While Codex Is Running" option. When enabled, Modafinil keeps sleep prevention requested but only applies it while a Codex app or `codex` command is running.
 
+## Sleep that really happens (Mac 0.14.0)
+
+Until 0.14.0 a sleep request on mains power often never reached sleep. macOS answered it
+with a display-off "DarkWake" (CPU on, network up) and stayed there, and Sleep History
+showed the Mac awake. Found on 2026-11-10: the Mac mini had not slept once in two days
+(`kern.sleeptime` was 0), and the MacBook sat in DarkWake for hours whenever it was plugged
+in with the lid closed. Three kinds of power assertion do this on mains power only (on
+battery macOS ignores them itself):
+
+- `NetworkClientActive`: a connected File Sharing client (the other Mac's mounted share);
+- `PreventSystemSleep`: `caffeinate -s`, or an app;
+- `BackgroundTask`: macOS background work while Power Nap is on (Photos analysis and so on).
+
+What 0.14.0 does:
+
+- **Hard sleep.** From a sleep request until that sleep is over, the helper switches those
+  three assertion types off system-wide with powerd's root-only switch
+  (`pmset disableassertion <type>`). Nothing is killed and no service is stopped; the
+  assertions simply do not count while the Mac is meant to sleep. A wake you asked for
+  (Wake & Keep Awake, the keyboard or mouse, the lid), a failed request, or quitting
+  Modafinil switches them back on. powerd counts disables and forgets them at a restart, so
+  each one is paired with one enable through
+  `/Library/Application Support/Modafinil/sleep-enforcement.json`, tied to the boot.
+- **Quit Sunshine before sleep** (Settings → Before sleeping, on by default, shown when
+  Sunshine is installed). A Mac that streams to Moonlight cannot stay asleep: the stream
+  keeps it awake, the client's input counts as someone using the Mac, and an open Moonlight
+  window keeps polling Sunshine and wakes the Mac again. Modafinil ends Sunshine before
+  every sleep it starts, also while you are connected. When the sleep is over Sunshine
+  starts again: by your own login agent if you have one, otherwise Modafinil opens it after
+  a minute.
+- **A flag for your own scripts.** `~/Library/Application Support/Modafinil/sleeping`
+  exists from a sleep request until that sleep is over. A script that restarts Sunshine or
+  wakes the display should do nothing while it exists and Modafinil is running.
+- **Sleep Now** on the Overview page and in the menu bar card puts this Mac to sleep the
+  same way as the iPhone. Keyboard or mouse input in the first 5 seconds after any sleep
+  request is taken as the request itself; after that, input still cancels a sleep that has
+  not happened yet.
+- **The T3 rule waits for jobs that ask to stay awake.** Because a sleep now really
+  happens, "Sleep when T3 Code finishes" waits while a command-line job holds a
+  system-sleep assertion (`caffeinate -s`, as agents use around renders); its status names
+  the job. An explicit sleep (iPhone, another Mac, a timer, Sleep Now) does not wait, and
+  Sleep History notes which job it overrode.
+- **Complete Sleep History.** The helper now stays running and notes every sleep and wake
+  itself (two sysctls every 5 seconds while the Mac is awake); before, the app missed most
+  background wakes and showed a Mac that slept all day as awake. Sleep that nobody saw
+  (wakes too short to sample, or the helper not running) is measured from macOS's two
+  clocks and entered as "Asleep (background wakes not recorded)". After an app update the
+  helper restarts itself once the old app has quit.
+
+The phone needs no update: protocol and pairing are unchanged.
+
+Limits: macOS still wakes a sleeping Mac in the background (maintenance, network); those
+wakes are short and return to sleep by themselves, and Sleep History shows them. Apple
+menu → Sleep is macOS's own path and is not hardened; use Modafinil's Sleep.
+
 ## Remote shutdown (Mac 0.13.0 / Companion 1.12)
 
 Modafinil can turn a Mac off completely, from the iPhone, from another Mac

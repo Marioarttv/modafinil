@@ -110,6 +110,13 @@ final class AppDelegate: NSObject,
     private var shutdownTurnedOffT3Rule = false
     /// Bumped by every timer change, so a slow helper reply cannot restore a cancelled timer.
     private var powerTimerGeneration = 0
+    /// From asking the helper to sleep until it answers: the sleeping flag is already up.
+    private var isSleepRequestInFlight = false
+    private var streamingResumeWork: DispatchWorkItem?
+    /// Exists from a sleep request until that sleep is over (the helper's sleep intent).
+    /// The user's own scripts read it, for example a login agent that restarts Sunshine.
+    static let sleepingFlagURL = PowerHistoryStore.defaultURL.deletingLastPathComponent()
+        .appendingPathComponent("sleeping")
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         if let event = NSAppleEventManager.shared().currentAppleEvent,
@@ -218,6 +225,8 @@ final class AppDelegate: NSObject,
         releaseRemoteUserActivity()
         // A logout ends Modafinil too; a shutdown timer never outlives the app's session.
         if shutdownSchedule != nil { setShutdownSchedule(nil) }
+        // Quitting ends a pending sleep and its intent; scripts must not wait on a flag.
+        try? FileManager.default.removeItem(at: Self.sleepingFlagURL)
         historyRecorder.recordAppStop()
         powerMonitor.stop()
         if let journalNotifyToken { notify_cancel(journalNotifyToken) }
@@ -275,6 +284,7 @@ final class AppDelegate: NSObject,
 
     /// A full (display) wake. NSWorkspace does not report background wakes.
     @objc private func workspaceDidWake() {
+        importHelperPowerEvents()
         historyRecorder.recordFullWake()
         companionServer?.ensureRunning()
         if !completeScheduledWakeIfDue() {
@@ -286,6 +296,7 @@ final class AppDelegate: NSObject,
 
     /// Every system wake, including lid-closed network wakes and macOS maintenance.
     private func handleSystemWake() {
+        importHelperPowerEvents()
         let snapshot = historyRecorder.recordWake()
         companionServer?.ensureRunning()
         synchronizeSleepJournal()
@@ -309,6 +320,13 @@ final class AppDelegate: NSObject,
         ) else { return }
         if snapshot?.hasGraphics != true { lastBackgroundLeaseAt = now }
         activateProvisionalWakeLease()
+    }
+
+    /// Before a wake is recorded, so sleep the helper already noted is not counted as
+    /// missing (see HiddenSleep).
+    private func importHelperPowerEvents() {
+        guard let journal = try? SleepJournalStore.read() else { return }
+        historyRecorder.importHelperEvents(journal.observedPowerEvents ?? [])
     }
 
     private func registerJournalNotification() {
@@ -847,6 +865,20 @@ final class AppDelegate: NSObject,
 
     func uiCancelSleepTimer() { cancelScheduledSleep(source: "Mac") }
 
+    func uiSleepNow() {
+        // An explicit sleep at the Mac: keep-awake stays off afterwards.
+        isKeepAwakeSuspendedForT3Sleep = false
+        pendingSleepSource = ("Mac", Date())
+        requestSystemSleep(source: "Mac") { [weak self] result in
+            guard let self, case .failure(let error) = result else { return }
+            self.pendingSleepSource = nil
+            self.lastError = "Could not sleep: \(error.localizedDescription)"
+            self.refreshIcon()
+        }
+    }
+
+    func uiToggleQuitStreaming() { toggleQuitStreaming() }
+
     func uiScheduleShutdown(after seconds: Int) {
         scheduleShutdown(argument: String(seconds), source: "Mac") { [weak self] result in
             switch result {
@@ -1105,6 +1137,7 @@ final class AppDelegate: NSObject,
             sleepAttempt = journal.attempt
             powerNotices.publish(sleeping: journal.intent != nil || shutdownProgress?.phase == .pending,
                                  secret: companionConfigurationStore.secret)
+            updateSleepingFlag(intentActive: journal.intent != nil)
             if let attempt = sleepAttempt { noteSleepAttemptIfChanged(attempt) }
             armQuitBlockersTimer()
             if let attempt = sleepAttempt {
@@ -1137,6 +1170,9 @@ final class AppDelegate: NSObject,
             }
             pendingSleepSource = nil
             historyRecorder.note("Sleep requested (\(source))", at: attempt.requestedAt)
+            // A sleep the helper starts by itself (the sleep timer) never passes through
+            // requestSystemSleep. Its first native request is two seconds away.
+            if attempt.phase == .pending { pauseStreamingForSleep(source: source) }
         }
         switch attempt.phase {
         case .pending: break
@@ -1301,8 +1337,16 @@ final class AppDelegate: NSObject,
         releaseRemoteUserActivity()
         // The wait for new T3 activity belongs to the wake that just ended.
         t3SleepWatch.clearWaitForNewActivity()
+        // The flag goes up first, so nothing restarts what is quit below.
+        isSleepRequestInFlight = true
+        updateSleepingFlag(intentActive: true)
+        pauseStreamingForSleep(source: source)
         // The helper retries for about 30 s, which gives the apps time to quit.
         quitSleepBlockingApps(before: source)
+        let jobs = keepAwakeJobs(effects: [.systemSleep]).map(\.title)
+        if !jobs.isEmpty {
+            historyRecorder.note("Sleeping although \(jobs.prefix(3).joined(separator: ", ")) asked to keep the Mac awake (\(source))")
+        }
         lastError = nil
         companionConfigurationStore.isWakeArmed = true
         cancelProvisionalWakeLease()
@@ -1315,6 +1359,10 @@ final class AppDelegate: NSObject,
             guard let self else { return }
 
             self.isToggleInFlight = false
+            self.isSleepRequestInFlight = false
+            // Reads the helper's intent: the flag stays for an accepted sleep and goes
+            // (restarting what was quit) for a refused one.
+            self.synchronizeSleepJournal()
             switch result {
             case .success:
                 self.isSleepPreventionEnabled = false
@@ -1405,7 +1453,9 @@ final class AppDelegate: NSObject,
     /// One line for the phone and the Mac: T3's state plus what the rule waits for.
     private func t3StatusLine(_ activity: T3Activity) -> String {
         var summary = activity.summary
-        if t3PowerAction == .shutdown {
+        if t3PowerAction == .sleep, let hold = t3ShutdownHold, activity.isFinished {
+            summary += " · " + hold
+        } else if t3PowerAction == .shutdown {
             if let hold = t3ShutdownHold, activity.isFinished { summary += " · " + hold }
             else if !t3ShutdownGate.allowsShutdown, activity.isFinished || t3ShutdownGate.requiresNewRun {
                 summary += " · shuts down after the next T3 run"
@@ -1971,9 +2021,70 @@ final class AppDelegate: NSObject,
         refreshIcon()
     }
 
-    private func keepAwakeJobs() -> [KeepAwakeJobs.Job] {
-        KeepAwakeJobs.find(assertions: SleepBlockers.readAssertions(),
+    private func keepAwakeJobs(effects: Set<SleepBlocker.Effect> = [.systemSleep, .idleSleep]) -> [KeepAwakeJobs.Job] {
+        KeepAwakeJobs.find(assertions: SleepBlockers.readAssertions(), effects: effects,
                            isRegularApp: { NSRunningApplication(processIdentifier: $0)?.activationPolicy == .regular })
+    }
+
+    /// Why the T3 rule does not sleep yet: a command-line job asked macOS to keep the
+    /// system awake (`caffeinate -s` around a render, for example). A sleep Modafinil
+    /// requests now really happens, so the automatic rule waits for such a job, as its
+    /// shutdown does. An explicit sleep (iPhone, another Mac, a timer, Sleep Now) does not.
+    private func t3SleepHoldReason() -> String? {
+        let jobs = keepAwakeJobs(effects: [.systemSleep]).map(\.title)
+        return jobs.isEmpty ? nil : "waiting for \(jobs.prefix(2).joined(separator: ", ")) to finish"
+    }
+
+    // MARK: Streaming host and the sleeping flag
+
+    private var isQuitStreamingEnabled: Bool {
+        UserDefaults.standard.object(forKey: Self.quitStreamingDefaultsKey) as? Bool ?? true
+    }
+
+    private func toggleQuitStreaming() {
+        UserDefaults.standard.set(!isQuitStreamingEnabled, forKey: Self.quitStreamingDefaultsKey)
+        historyRecorder.note("Quit \(StreamingHost.name) before sleep \(isQuitStreamingEnabled ? "on" : "off")")
+        refreshUI()
+    }
+
+    private func pauseStreamingForSleep(source: String) {
+        guard isQuitStreamingEnabled, StreamingHost.quit() else { return }
+        UserDefaults.standard.set(true, forKey: Self.streamingQuitForSleepDefaultsKey)
+        historyRecorder.note("Quit \(StreamingHost.name) before sleep (\(source))")
+    }
+
+    private func updateSleepingFlag(intentActive: Bool) {
+        let wanted = intentActive || isSleepRequestInFlight
+        let url = Self.sleepingFlagURL
+        let exists = FileManager.default.fileExists(atPath: url.path)
+        if wanted, !exists {
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if !FileManager.default.createFile(atPath: url.path, contents: nil) {
+                NSLog("Modafinil could not create the sleeping flag")
+            }
+        } else if !wanted {
+            if exists { try? FileManager.default.removeItem(at: url) }
+            resumeStreamingAfterSleep()
+        }
+    }
+
+    /// The sleep is over. A login agent that manages Sunshine restarts it when the flag
+    /// goes; if nothing has after a minute, Modafinil opens it again itself.
+    private func resumeStreamingAfterSleep() {
+        guard UserDefaults.standard.bool(forKey: Self.streamingQuitForSleepDefaultsKey),
+              streamingResumeWork == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.streamingResumeWork = nil
+            // Asleep again in the meantime: the next wake comes back here.
+            guard !FileManager.default.fileExists(atPath: Self.sleepingFlagURL.path) else { return }
+            UserDefaults.standard.removeObject(forKey: Self.streamingQuitForSleepDefaultsKey)
+            guard StreamingHost.runningPIDs.isEmpty else { return }
+            StreamingHost.open()
+            self.historyRecorder.note("Opened \(StreamingHost.name) again after sleep")
+        }
+        streamingResumeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: work)
     }
 
     // MARK: Sleep when T3 Code threads finish
@@ -2080,6 +2191,9 @@ final class AppDelegate: NSObject,
                                                               isShuttingDown: false) {
                 t3SleepAt = nil
                 if t3ShutdownHold != reason { t3ShutdownHold = reason; refreshUI() }
+            } else if t3PowerAction == .sleep, let reason = t3SleepHoldReason() {
+                t3SleepAt = nil
+                if t3ShutdownHold != reason { t3ShutdownHold = reason; refreshUI() }
             } else {
                 t3SleepAt = sleepAt
                 t3ShutdownHold = nil
@@ -2124,6 +2238,16 @@ final class AppDelegate: NSObject,
             return
         case .sleepNow:
             t3SleepAt = nil
+            // Still finished after the grace period. Re-checked every 15 s until the job ends.
+            if let reason = t3SleepHoldReason() {
+                if t3ShutdownHold != reason {
+                    t3ShutdownHold = reason
+                    historyRecorder.note("Sleep after T3 Code finished: \(reason)")
+                    refreshUI()
+                }
+                return
+            }
+            t3ShutdownHold = nil
             t3SleepWatch.reset()
             endT3WatchActivity()
             performT3Sleep()
@@ -2457,6 +2581,8 @@ final class AppDelegate: NSObject,
         snapshot.t3SleepAt = t3SleepAt
         snapshot.isT3RestorePending = isKeepAwakeSuspendedForT3Sleep
         snapshot.isQuitBlockersEnabled = isQuitBlockersEnabled
+        snapshot.isStreamingHostInstalled = StreamingHost.isInstalled
+        snapshot.isQuitStreamingEnabled = isQuitStreamingEnabled
         let exclusions = quitBlockersExclusions
         snapshot.quitExclusions = exclusions.map { AppChoice(bundleID: $0.key, name: $0.value) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -2610,6 +2736,9 @@ final class AppDelegate: NSObject,
     private static let t3ShutdownTrigger = "T3 Code finished"
     private static let shutdownScheduleDefaultsKey = "ShutdownSchedule"
     private static let quitBlockersDefaultsKey = "QuitSleepBlockersBeforeSleep"
+    private static let quitStreamingDefaultsKey = "QuitStreamingBeforeSleep"
+    /// Sunshine was quit for the current sleep and is owed a restart.
+    private static let streamingQuitForSleepDefaultsKey = "StreamingQuitForSleep"
     private static let quitBlockersExclusionsDefaultsKey = "QuitSleepBlockersExclusions"
 }
 

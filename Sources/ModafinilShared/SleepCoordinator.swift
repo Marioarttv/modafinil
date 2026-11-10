@@ -121,16 +121,26 @@ public final class SleepCoordinator {
     private let snapshot: () -> PowerSnapshot?
     private let userIdle: () -> TimeInterval?
     private var lastUserIdle: TimeInterval?
+    /// Input right after a sleep request is the click or tap that asked for it.
+    private var inputGraceUntil: TimeInterval = 0
+    public static let inputGrace: TimeInterval = 5
+    /// Kernel stamps last turned into history events (0 until the first look).
+    private var observed: (slept: TimeInterval, woke: TimeInterval)?
     public var hasWork: Bool { journal.intent != nil || journal.schedule != nil || journal.attempt?.phase == .pending }
 
-    /// How the helper should wake itself: never, once at the timer date, or every
-    /// second during verification or a bounded background-wake grace period.
-    public enum TimerMode: Equatable { case idle, deadline(Date), verifying, monitoring }
+    /// From a sleep request until that sleep is over, assertions that would hold the Mac
+    /// in a display-off DarkWake on mains power are out of effect (see SleepEnforcement).
+    public var wantsSleepEnforcement: Bool { journal.intent != nil || journal.attempt?.phase == .pending }
+
+    /// How the helper should wake itself: once at the timer date, every second during
+    /// verification or a bounded background-wake grace period, and otherwise every few
+    /// seconds to note sleeps and wakes for Sleep History (`observing`, `monitoring`).
+    public enum TimerMode: Equatable { case observing, deadline(Date), verifying, monitoring }
     public var timerMode: TimerMode {
         if journal.attempt?.phase == .pending || isAwaitingFirstWake || journal.intent?.returnAfter != nil { return .verifying }
         if journal.intent != nil { return .monitoring }
         if let schedule = journal.schedule { return .deadline(schedule.date) }
-        return .idle
+        return .observing
     }
 
     /// Sleep confirmed before macOS actually stopped the CPU: the next tick runs at
@@ -234,6 +244,7 @@ public final class SleepCoordinator {
         if maintainSleepIntent {
             journal.intent = SleepIntent(boot: times.boot, lastSleep: times.slept, lastWake: times.woke)
             lastUserIdle = userIdle()
+            inputGraceUntil = time + Self.inputGrace
         }
         journal.schedule = nil
         journal.attempt = SleepAttempt(id: UUID().uuidString, requestedAt: now(), baselineSleep: times.slept,
@@ -252,8 +263,9 @@ public final class SleepCoordinator {
         do {
             let time = continuous()
             let times = try powerTimes()
+            observePowerEvents(times)
             if let intent = journal.intent, times.woke <= intent.lastWake, let idle = userIdle() {
-                if let previous = lastUserIdle, idle + 0.5 < previous {
+                if time >= inputGraceUntil, let previous = lastUserIdle, idle + 0.5 < previous {
                     try cancelPending()
                     return
                 }
@@ -394,6 +406,30 @@ public final class SleepCoordinator {
             // No disk writes on unchanged verification ticks.
             if intent != lastSavedIntent { try persist() }
         }
+    }
+
+    /// Notes every sleep and wake the kernel reports, whether or not Modafinil asked
+    /// for it: the app often misses background wakes (no IOKit notification, App Nap),
+    /// which made Sleep History show a sleeping Mac as awake. Two sysctls per call.
+    private func observePowerEvents(_ times: SystemSleepTimes) {
+        guard let last = observed else {
+            // First look after the helper started: the app's own recorder has these.
+            observed = (times.slept, times.woke)
+            return
+        }
+        guard times.slept > last.slept || times.woke > last.woke else { return }
+        let power = snapshot()
+        let before = journal.observedPowerEvents
+        if times.slept > last.slept {
+            recordPowerEvent(PowerEvent(kind: .sleep, at: times.slept,
+                reason: power?.lastSleepReason, pid: power?.sleepRequestedByPID))
+        }
+        if times.woke > last.woke, times.woke >= times.slept {
+            recordPowerEvent(PowerEvent(kind: .wake, at: times.woke,
+                reason: power?.combinedWakeReason, dark: power?.hasGraphics.map { !$0 }))
+        }
+        observed = (max(last.slept, times.slept), max(last.woke, times.woke))
+        if journal.observedPowerEvents != before { try? persist() }
     }
 
     private func recordPowerEvent(_ event: PowerEvent) {

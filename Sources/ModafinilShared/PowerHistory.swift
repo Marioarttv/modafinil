@@ -401,6 +401,51 @@ public struct PowerRecorderState: Equatable {
     }
 }
 
+/// Sleep the recorders did not see. macOS keeps two clocks, one that stops while the
+/// Mac sleeps and one that does not; their difference is the exact time spent asleep.
+/// When more of it passed between two looks than the recorded sleeps explain (wakes too
+/// short to be sampled, or the helper not running), the rest is entered as one sleep, so
+/// a Mac that slept all day is never shown as awake.
+public enum HiddenSleep {
+    public static let reason = "Asleep (background wakes not recorded)"
+    /// Shorter gaps are clock and sampling noise.
+    public static let threshold: Double = 60
+
+    /// Seconds asleep since boot.
+    public static func asleepTotal() -> Double {
+        let continuous = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)
+        let awake = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        return continuous > awake ? Double(continuous - awake) / 1_000_000_000 : 0
+    }
+
+    /// - Parameters:
+    ///   - events: everything recorded so far, including the wake being handled.
+    ///   - since: when the recorder last looked (the Mac was awake then).
+    ///   - asleep: seconds the clocks say the Mac slept between `since` and `now`.
+    /// - Returns: a sleep event covering the unrecorded part, or nil.
+    public static func missingSleep(events: [PowerEvent], since: Double, now: Double, asleep: Double) -> PowerEvent? {
+        let window = events.filter { ($0.kind == .sleep || $0.kind == .wake) && $0.at > since && $0.at <= now }
+            .sorted { $0.at < $1.at }
+        var recorded = 0.0
+        var sleptAt: Double?
+        for event in window {
+            if event.kind == .sleep {
+                if sleptAt == nil { sleptAt = event.at }
+            } else if let start = sleptAt {
+                recorded += event.at - start
+                sleptAt = nil
+            }
+        }
+        if let start = sleptAt { recorded += now - start }
+        let missing = min(asleep - recorded, now - since - recorded)
+        guard missing > threshold else { return nil }
+        // Placed right before the first recorded sleep: with the helper sampling, the
+        // unseen part is a sleep that began just after the last look.
+        let end = window.first(where: { $0.kind == .sleep })?.at ?? now
+        return PowerEvent(kind: .sleep, at: max(since, end - missing), reason: reason)
+    }
+}
+
 /// Decides whether a system wake should start the 90-second recovery keep-awake.
 public enum WakeRecoveryPolicy {
     public static let quietPeriodAfterSleepRequest: TimeInterval = 120

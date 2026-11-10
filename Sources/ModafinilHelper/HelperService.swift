@@ -4,12 +4,18 @@ import ModafinilShared
 final class HelperService: NSObject, NSXPCListenerDelegate {
     private let listener = NSXPCListener(machServiceName: ModafinilConstants.helperMachServiceName)
     private let stateQueue = DispatchQueue(label: "com.narcotic.modafinil.helper.state")
-    private let idleExitDelay: TimeInterval = 15
     private var connectedSessionIDs = Set<UUID>()
     private var activeLeaseIDs = Set<UUID>()
-    private var idleExitWorkItem: DispatchWorkItem?
     private var sleepTickTimer: DispatchSourceTimer?
-    private var sleepTimerMode: SleepCoordinator.TimerMode = .idle
+    private var sleepTimerMode: SleepCoordinator.TimerMode = .observing
+    private var sleepEnforcement = SleepEnforcement(setType: { type, disabled in
+        // pmset reports a refusal on standard output and still exits 0.
+        let output = try Shell.run("/usr/bin/pmset", [disabled ? "disableassertion" : "enableassertion", type])
+        if !output.isEmpty { throw SleepError(output) }
+    })
+    private var lastEnforcementProblem: String?
+    /// The helper binary this process was started from (device, inode, change time).
+    private let startedFrom = HelperService.executableIdentity()
     private var sleepJournalLoadError: String?
     private lazy var sleepCoordinator: SleepCoordinator = {
         let journal: SleepJournal
@@ -192,10 +198,25 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         }
     }
 
-    /// Wakes the helper only when needed: once at the timer date (wall clock, so it
-    /// also fires right after a wake if the date passed during sleep), and once per
-    /// second only during sleep verification or a background-wake grace period.
+    /// Holds powerd's assertion switch exactly while the coordinator wants it. Called
+    /// after every state change and tick, so it is engaged before the first native
+    /// sleep request (two seconds after a request) and released with the sleep intent.
+    private func reconcileSleepEnforcement() {
+        let wanted = sleepCoordinator.wantsSleepEnforcement
+        guard wanted != sleepEnforcement.isEngaged || lastEnforcementProblem != nil else { return }
+        let problem = sleepEnforcement.set(engaged: wanted)
+        if let problem, problem != lastEnforcementProblem {
+            NSLog("ModafinilHelper sleep enforcement: %@", problem)
+        }
+        lastEnforcementProblem = problem
+    }
+
+    /// The tick timer: once at the timer date (wall clock, so it also fires right after
+    /// a wake if the date passed during sleep), once per second during sleep
+    /// verification or a bounded background-wake grace period, and every five seconds
+    /// otherwise, to note sleeps and wakes for Sleep History.
     private func updateSleepTickTimer() {
+        reconcileSleepEnforcement()
         let mode = sleepCoordinator.timerMode
         if mode == sleepTimerMode, sleepTickTimer != nil { return }
         sleepTickTimer?.cancel()
@@ -203,13 +224,10 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         sleepTimerMode = mode
         let timer: DispatchSourceTimer
         switch mode {
-        case .idle:
-            scheduleIdleExitIfNeeded()
-            return
         case .verifying:
             timer = DispatchSource.makeTimerSource(queue: stateQueue)
             timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
-        case .monitoring:
+        case .monitoring, .observing:
             // Dispatch timers do not schedule a hardware wake. This runs only
             // while the CPU is awake; some dark wakes omit IOKit notifications.
             timer = DispatchSource.makeTimerSource(queue: stateQueue)
@@ -225,11 +243,11 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
             // The repeat only matters if the wall clock moved backwards.
             timer.schedule(wallDeadline: wall, repeating: 30, leeway: .milliseconds(500))
         }
-        cancelIdleExit()
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             self.sleepCoordinator.tick()
             self.updateSleepTickTimer()
+            self.exitIfReplaced()
         }
         sleepTickTimer = timer
         timer.resume()
@@ -253,7 +271,6 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
     private func clientConnectionStarted(sessionID: UUID) {
         stateQueue.async {
             self.connectedSessionIDs.insert(sessionID)
-            self.cancelIdleExit()
         }
     }
 
@@ -271,8 +288,6 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
                     NSLog("ModafinilHelper could not restore sleep after client disconnect: \(error.localizedDescription)")
                 }
             }
-
-            self.scheduleIdleExitIfNeeded()
         }
     }
 
@@ -287,7 +302,6 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
                 self.sleepCoordinator.stopAfterFailure("Sleep monitoring could not restart: \(error.localizedDescription)")
             }
             self.updateSleepTickTimer()
-            self.scheduleIdleExitIfNeeded()
         }
     }
 
@@ -306,27 +320,21 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         }
     }
 
-    private func scheduleIdleExitIfNeeded() {
-        guard connectedSessionIDs.isEmpty, activeLeaseIDs.isEmpty, !sleepCoordinator.hasWork else { return }
-
-        cancelIdleExit()
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.exitIfStillIdle()
-        }
-        idleExitWorkItem = workItem
-        stateQueue.asyncAfter(deadline: .now() + idleExitDelay, execute: workItem)
+    private static func executableIdentity() -> String? {
+        guard let path = Bundle.main.executablePath else { return nil }
+        var info = stat()
+        guard stat(path, &info) == 0 else { return nil }
+        return "\(info.st_dev):\(info.st_ino):\(info.st_ctimespec.tv_sec).\(info.st_ctimespec.tv_nsec)"
     }
 
-    private func cancelIdleExit() {
-        idleExitWorkItem?.cancel()
-        idleExitWorkItem = nil
-    }
-
-    private func exitIfStillIdle() {
-        idleExitWorkItem = nil
-
-        guard connectedSessionIDs.isEmpty, activeLeaseIDs.isEmpty, !sleepCoordinator.hasWork else { return }
-        NSLog("ModafinilHelper exiting after idle timeout")
+    /// The helper stays running to note sleeps and wakes, so after an app update it
+    /// makes room for the new binary itself: once the app is gone and nothing is
+    /// pending, a replaced (or removed) executable ends this process. launchd starts
+    /// the installed helper for the next request.
+    private func exitIfReplaced() {
+        guard connectedSessionIDs.isEmpty, activeLeaseIDs.isEmpty, !sleepCoordinator.hasWork,
+              !sleepEnforcement.isEngaged, Self.executableIdentity() != startedFrom else { return }
+        NSLog("ModafinilHelper exiting: its executable was replaced")
         exit(EXIT_SUCCESS)
     }
 

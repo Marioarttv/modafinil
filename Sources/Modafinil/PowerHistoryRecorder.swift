@@ -12,6 +12,8 @@ final class PowerHistoryRecorder {
     private var lastCompaction = Date().timeIntervalSince1970
     private(set) var lastSnapshot: PowerSnapshot?
     var modafinilPIDs: Set<Int32> = []
+    /// The last look at the sleep clock, for sleeps nobody recorded (see HiddenSleep).
+    private var lastLook: (at: Double, asleep: Double)?
 
     init(store: PowerHistoryStore = PowerHistoryStore()) {
         self.store = store
@@ -25,6 +27,7 @@ final class PowerHistoryRecorder {
             append(state.events(for: snapshot, onStart: true))
         }
         append([PowerEvent(kind: .appStart, at: Date().timeIntervalSince1970)])
+        lastLook = (Date().timeIntervalSince1970, HiddenSleep.asleepTotal())
     }
 
     /// Called for every system wake. Returns the snapshot used, for wake-cause decisions.
@@ -33,8 +36,23 @@ final class PowerHistoryRecorder {
         guard let snapshot = PowerSnapshot.read() else { return nil }
         lastSnapshot = snapshot
         append(state.events(for: snapshot))
+        accountForHiddenSleep()
         compactIfDue()
         return snapshot
+    }
+
+    /// Call after the helper's observations were imported, so only sleep that neither
+    /// recorder saw is added.
+    private func accountForHiddenSleep() {
+        let now = Date().timeIntervalSince1970
+        let asleep = HiddenSleep.asleepTotal()
+        defer { lastLook = (now, asleep) }
+        // A smaller total means a restart; the boot event covers that gap.
+        guard let last = lastLook, asleep >= last.asleep else { return }
+        if let event = HiddenSleep.missingSleep(events: events, since: last.at, now: now,
+                                                asleep: asleep - last.asleep) {
+            append([event])
+        }
     }
 
     /// Called when the display side of macOS wakes (a full, user-visible wake).

@@ -121,12 +121,16 @@ final class SleepIntentTests: XCTestCase {
         f.sleepAndWake()
         XCTAssertEqual(f.engine.journal.attempt?.phase, .confirmed)
     }
-    func testLocalInputDuringInitialRequestPreventsAnySleepRequest() throws {
+    func testInputWhileWaitingForSleepCancelsOnceTheRequestGraceIsOver() throws {
+        // The first seconds belong to the click or tap that asked for sleep (0.14.0).
         let f = Fixture(); try f.engine.begin(maintainSleepIntent: true)
         f.idle = 0; f.advance(2)
+        XCTAssertNotNil(f.engine.journal.intent)
+        XCTAssertEqual(f.requests, 1)
+        f.advance(4); f.idle = 0; f.advance(1)
         XCTAssertNil(f.engine.journal.intent)
         XCTAssertEqual(f.engine.journal.attempt?.phase, .cancelled)
-        XCTAssertEqual(f.requests, 0)
+        XCTAssertEqual(f.requests, 1)
     }
     func testPendingIntentResumesExistingBudgetAfterHelperRestart() throws {
         let f = Fixture(); try f.start()

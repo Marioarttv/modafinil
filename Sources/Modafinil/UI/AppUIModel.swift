@@ -52,6 +52,9 @@ struct AppSnapshot {
     var t3SleepAt: Date?
     var isT3RestorePending = false
     var isQuitBlockersEnabled = false
+    /// Sunshine (the Moonlight streaming host) is installed on this Mac.
+    var isStreamingHostInstalled = false
+    var isQuitStreamingEnabled = true
     /// Apps that would be asked to quit right now.
     var quitCandidates: [String] = []
     var quitExclusions: [AppChoice] = []
@@ -104,6 +107,8 @@ protocol AppUIActions: AnyObject {
     func uiToggleLoginItem()
     func uiScheduleSleep(after seconds: Int)
     func uiCancelSleepTimer()
+    func uiSleepNow()
+    func uiToggleQuitStreaming()
     func uiScheduleShutdown(after seconds: Int)
     func uiSetT3PowerAction(_ action: RemotePowerAction)
     func uiScheduleWake(at date: Date)

@@ -99,6 +99,7 @@ public enum KeepAwakeJobs {
     ///   - executablePath: the process's executable, or nil when unknown.
     public static func find(
         assertions: [SleepBlockers.Assertion],
+        effects: Set<SleepBlocker.Effect> = [.systemSleep, .idleSleep],
         ownPID: Int32 = getpid(),
         isRegularApp: (Int32) -> Bool,
         executablePath: (Int32) -> String? = KeepAwakeJobs.executablePath,
@@ -109,7 +110,7 @@ public enum KeepAwakeJobs {
         for assertion in assertions where assertion.pid != ownPID && jobs[assertion.pid] == nil {
             let effect = SleepBlockers.effect(type: assertion.type, name: assertion.name,
                                               processName: assertion.processName)
-            guard effect == .systemSleep || effect == .idleSleep else { continue }
+            guard effects.contains(effect) else { continue }
             let isCaffeinate = assertion.processName == "caffeinate"
             if !isCaffeinate {
                 guard !isRegularApp(assertion.pid), let path = executablePath(assertion.pid),
