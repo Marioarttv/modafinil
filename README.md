@@ -121,9 +121,14 @@ What 0.14.0 does:
 
 The phone needs no update: protocol and pairing are unchanged.
 
-Limits: macOS still wakes a sleeping Mac in the background (maintenance, network); those
-wakes are short and return to sleep by themselves, and Sleep History shows them. Apple
-menu → Sleep is macOS's own path and is not hardened; use Modafinil's Sleep.
+Limits: macOS still wakes a sleeping Mac in the background, and Sleep History shows it.
+Other Apple devices on the network contact its AirPlay and Continuity services, which
+macOS wakes for while "Wake for network access" is on (needed for Wake-on-LAN); such a
+wake lasts about 45 seconds. With Power Nap on, macOS also uses these wakes for its own
+background work (contacts and file-provider sync were seen on the Mac mini), which held
+two of them for 60 and 142 seconds; turning Power Nap off in System Settings → Energy
+keeps them short. Apple menu → Sleep is macOS's own path and is not hardened; use
+Modafinil's Sleep.
 
 ## Remote shutdown (Mac 0.13.0 / Companion 1.12)
 
