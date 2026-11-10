@@ -297,6 +297,7 @@ public final class SleepCoordinator {
                 }
                 lastUserIdle = idle
             }
+            if try endIntentForNewJob() { return }
             if let schedule = journal.schedule, now() >= schedule.date || time >= schedule.continuousDeadline {
                 // Never put a just-awakened Mac back to sleep for an elapsed timer.
                 if times.slept > 0, times.slept <= schedule.date.timeIntervalSince1970,
@@ -383,6 +384,39 @@ public final class SleepCoordinator {
         }
     }
 
+    /// Someone started a job that asks macOS to stay awake (over SSH, say) during a
+    /// background wake of an intended sleep: they want the Mac on. The intent ends, a
+    /// return to sleep that is under way is called off, and sleep blockers count again
+    /// at once. Checked for as long as that wake lasts (its grace period, the helper's
+    /// own return to sleep, and after a failed one), but not before the first sleep:
+    /// the request itself overrode what was running then. A job that belongs to one the
+    /// request overrode (the next step of the same script) shares a parent with it and
+    /// does not count.
+    private func endIntentForNewJob() throws -> Bool {
+        guard var intent = journal.intent,
+              intent.returnAfter != nil || journal.attempt?.trigger == "sleep intent" else { return false }
+        let jobs = keepAwakeJobs()
+        let known = Set(intent.knownJobs ?? Self.family(jobs)) // journals from before 0.14.0
+        if intent.knownJobs == nil {
+            intent.knownJobs = known.sorted()
+            journal.intent = intent
+        }
+        guard jobs.contains(where: { !known.contains($0.key) && $0.value.isDisjoint(with: known) }) else {
+            return false
+        }
+        journal.intent = nil
+        lastUserIdle = nil
+        settleAt = nil
+        if journal.attempt?.phase == .pending {
+            journal.attempt?.phase = .cancelled
+            journal.attempt?.detail = "The return to sleep was called off: a job that keeps the Mac awake started."
+        }
+        recordPowerEvent(PowerEvent(kind: .note, at: now().timeIntervalSince1970,
+            note: "Stayed awake after a background wake: a job that keeps the Mac awake started"))
+        try persist()
+        return true
+    }
+
     /// Called on real power notifications as well as verification ticks. Network
     /// reachability and display wake alone never count as the user's wake command.
     private func maintainIntent(times: SystemSleepTimes, time: TimeInterval) throws {
@@ -416,22 +450,6 @@ public final class SleepCoordinator {
             backgroundWakeBegan()
         }
         if intent.returnAfter != nil {
-            // Someone started a job that asks macOS to stay awake (over SSH, say) during
-            // this wake: they want the Mac on, and sleep blockers count again at once.
-            // A job that belongs to one the request overrode (the next step of the same
-            // script, for example) does not count: it shares a parent with it.
-            let jobs = keepAwakeJobs()
-            let known = Set(intent.knownJobs ?? Self.family(jobs)) // journals from before 0.14.0
-            if intent.knownJobs == nil { intent.knownJobs = known.sorted() }
-            if jobs.contains(where: { !known.contains($0.key) && $0.value.isDisjoint(with: known) }) {
-                journal.intent = nil
-                lastUserIdle = nil
-                settleAt = nil
-                recordPowerEvent(PowerEvent(kind: .note, at: now().timeIntervalSince1970,
-                    note: "Stayed awake after a background wake: a job that keeps the Mac awake started"))
-                try persist()
-                return
-            }
             if let due = settleAt, time >= due {
                 settleAt = nil
                 backgroundWakeSettled()

@@ -238,6 +238,41 @@ final class HardSleepCoordinatorTests: XCTestCase {
         XCTAssertNotNil(f.engine.journal.intent?.returnAfter)
     }
 
+    func testAJobStartedWhileTheHelperReturnsToSleepCallsThatOff() throws {
+        let f = Fixture(); try f.start(); f.sleepAndWake()
+        f.advance(90) // the grace is over: the helper starts its own return to sleep
+        XCTAssertEqual(f.engine.journal.attempt?.trigger, "sleep intent")
+        XCTAssertEqual(f.engine.journal.attempt?.phase, .pending)
+        f.jobs = [77: [76]]
+        f.advance(1)
+        XCTAssertNil(f.engine.journal.intent)
+        XCTAssertEqual(f.engine.journal.attempt?.phase, .cancelled)
+        XCTAssertFalse(f.engine.wantsSleepEnforcement)
+        f.advance(60)
+        XCTAssertEqual(f.requests, 1) // no native request for the return was sent
+    }
+
+    func testAJobStartedAfterAFailedReturnStillEndsTheIntent() throws {
+        // A Power Nap task holds the wake for minutes; someone logs in late and starts a job.
+        let f = Fixture(); try f.start(); f.sleepAndWake()
+        f.advance(90); f.advance(2); f.advance(130)
+        XCTAssertEqual(f.engine.journal.attempt?.phase, .failed)
+        XCTAssertNotNil(f.engine.journal.intent)
+        f.jobs = [77: [76]]
+        f.advance(5)
+        XCTAssertNil(f.engine.journal.intent)
+        XCTAssertFalse(f.engine.wantsSleepEnforcement)
+    }
+
+    func testAJobStartedBeforeTheFirstSleepDoesNotUndoTheRequest() throws {
+        let f = Fixture(); try f.engine.begin(maintainSleepIntent: true)
+        f.jobs = [77: [76]]
+        f.advance(2); f.advance(10)
+        XCTAssertNotNil(f.engine.journal.intent)
+        XCTAssertEqual(f.engine.journal.attempt?.phase, .pending)
+        XCTAssertEqual(f.requests, 2)
+    }
+
     func testARestartedHelperStillKnowsWhichJobsTheRequestOverrode() throws {
         let f = Fixture(); f.jobs = [41: [40]]
         try f.start(); f.sleepAndWake()

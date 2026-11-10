@@ -64,9 +64,12 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         performStartupCleanup()
         // A wake too short for the 40-second step, or a client that reconnected after it:
         // File Sharing also lets go at the moment an intended sleep begins again.
+        // Not during the request's own first sleep: a client that unmounts on the sleep
+        // notice gets to finish. The helper's later returns to sleep are included.
         powerMonitor.onWillSleep = { [weak self] in
-            guard let self, self.sleepCoordinator.journal.intent != nil,
-                  self.sleepCoordinator.journal.attempt?.phase != .pending else { return }
+            guard let self, self.sleepCoordinator.journal.intent != nil else { return }
+            let attempt = self.sleepCoordinator.journal.attempt
+            guard attempt?.phase != .pending || attempt?.trigger == "sleep intent" else { return }
             self.endFileSharingDaemon()
         }
         powerMonitor.onDidWake = { [weak self] in

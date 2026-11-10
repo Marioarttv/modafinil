@@ -65,7 +65,12 @@ public final class SystemPowerMonitor {
             IOAllowPowerChange(rootPort, Int(bitPattern: argument))
         case Self.systemWillSleep:
             IOAllowPowerChange(rootPort, Int(bitPattern: argument))
-            callbackQueue.async { [weak self] in self?.onWillSleep?() }
+            // If the Mac is asleep before this runs, it would run at the next wake: skip it.
+            let noticed = SystemSleepTimes.continuousTime
+            callbackQueue.async { [weak self] in
+                guard SystemSleepTimes.continuousTime - noticed < 5 else { return }
+                self?.onWillSleep?()
+            }
         case Self.systemHasPoweredOn:
             callbackQueue.async { [weak self] in self?.onDidWake?() }
         default:
