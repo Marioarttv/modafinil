@@ -129,8 +129,9 @@ public final class SleepCoordinator {
     public static let localInputGrace: TimeInterval = 5
     /// When to tidy up after the current background wake (see `settleDelay`).
     private var settleAt: TimeInterval?
-    /// A client whose connection caused the wake gets this long to establish it.
-    public static let settleDelay: TimeInterval = 10
+    /// Just before the helper's 45-second hold on a background wake ends and macOS
+    /// returns to sleep: a Wake & Keep Awake that arrives earlier ends the intent first.
+    public static let settleDelay: TimeInterval = 40
     /// Command-line jobs that already asked macOS to stay awake when sleep was requested.
     /// The request overrode those; one that starts during a later background wake did
     /// not exist then, and ends the intent instead of being slept over.

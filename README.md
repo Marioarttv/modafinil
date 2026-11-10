@@ -94,12 +94,13 @@ What 0.14.0 does:
   has been replaced. (An update from 0.13.0 or earlier still needs the old helper's
   15-second idle exit: quit the app, replace it, wait, then open it.)
 
-- **No 28-second wait at every return to sleep.** An `smbd` left running after its clients
-  disconnected never answers macOS's sleep notification, so every return to sleep waited
-  out its 28-second timeout (macOS 27.2). Ten seconds into a background wake of an intended
-  sleep the helper ends an `smbd` that has no connected client; launchd starts a new one
-  for the next connection. One that is serving a client is left alone.
-
+- **File Sharing lets go when the Mac returns to sleep.** If no Wake & Keep Awake has
+  arrived 40 seconds into a background wake of an intended sleep, the helper ends `smbd`;
+  launchd starts a new one for the next connection. A running `smbd` never answers
+  macOS's sleep notification, so every return to sleep waited out its 28-second timeout
+  (macOS 27.2), and a client that is still connected (the other Mac's unmount can come
+  minutes late) woke the Mac again ten seconds after every sleep. That session cannot
+  outlive the sleep anyway.
 - **The wake alarm also starts a shut-down Mac** (see Remote shutdown below).
 
 The phone needs no update: protocol and pairing are unchanged.

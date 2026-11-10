@@ -183,18 +183,22 @@ final class HardSleepCoordinatorTests: XCTestCase {
         XCTAssertEqual(f.requests, 1) // never slept over
     }
 
-    func testBackgroundWakeIsTidiedUpOnceAfterTenSeconds() throws {
+    func testBackgroundWakeIsTidiedUpOnceJustBeforeTheMacReturnsToSleep() throws {
         let f = Fixture(); try f.start(); f.sleepAndWake()
         XCTAssertEqual(f.backgroundWakes, 1); XCTAssertEqual(f.settled, 0)
-        f.advance(9); XCTAssertEqual(f.settled, 0)
+        f.advance(39); XCTAssertEqual(f.settled, 0)
         f.advance(1); XCTAssertEqual(f.settled, 1)
-        f.advance(30); XCTAssertEqual(f.settled, 1)
-        f.sleepAndWake(); f.advance(10)
+        f.advance(20); XCTAssertEqual(f.settled, 1)
+        f.sleepAndWake(); f.advance(40)
         XCTAssertEqual(f.backgroundWakes, 2); XCTAssertEqual(f.settled, 2)
 
-        let used = Fixture(); try used.start(); used.reason = "HID Activity"; used.sleepAndWake(); used.advance(15)
+        // Wake & Keep Awake inside the 40 seconds: nothing is tidied up.
+        let woken = Fixture(); try woken.start(); woken.sleepAndWake(); woken.advance(20)
+        try woken.engine.cancelPending(); woken.advance(60)
+        XCTAssertEqual(woken.settled, 0)
+        let used = Fixture(); try used.start(); used.reason = "HID Activity"; used.sleepAndWake(); used.advance(45)
         XCTAssertEqual(used.backgroundWakes, 0); XCTAssertEqual(used.settled, 0)
-        let noIntent = Fixture(); noIntent.advance(5); noIntent.sleepAndWake(); noIntent.advance(15)
+        let noIntent = Fixture(); noIntent.advance(5); noIntent.sleepAndWake(); noIntent.advance(45)
         XCTAssertEqual(noIntent.backgroundWakes, 0); XCTAssertEqual(noIntent.settled, 0)
     }
 

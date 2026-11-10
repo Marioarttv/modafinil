@@ -40,7 +40,7 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
             Set(KeepAwakeJobs.find(assertions: SleepBlockers.readAssertions(), effects: [.systemSleep],
                                    isRegularApp: { _ in false }).map(\.pid))
         }, backgroundWakeBegan: { [unowned self] in self.holdBackgroundWake() },
-           backgroundWakeSettled: { [unowned self] in self.endIdleFileSharingDaemon() })
+           backgroundWakeSettled: { [unowned self] in self.endFileSharingDaemon() })
     }()
     private let wakeScheduler = WakeScheduler()
     private lazy var powerMonitor = SystemPowerMonitor(callbackQueue: stateQueue)
@@ -267,17 +267,16 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         }
     }
 
-    /// An smbd left running after its clients disconnected never answers macOS's sleep
-    /// notification, so every return to sleep waits out its 28-second timeout (macOS
-    /// 27.2). Ten seconds into a background wake of an intended sleep, an smbd without a
-    /// connected client is ended; launchd starts a new one for the next connection. One
-    /// with a client (it holds NetworkClientActive, also while that type is switched
-    /// off) is left alone.
-    private func endIdleFileSharingDaemon() {
-        let serving = SleepBlockers.readAssertions().contains {
-            $0.processName == "smbd" && $0.type == "NetworkClientActive"
-        }
-        guard !serving else { return }
+    /// Runs when a background wake of an intended sleep is about to end with the Mac
+    /// going back to sleep (no Wake & Keep Awake arrived in 40 seconds). File Sharing's
+    /// smbd is ended; launchd starts a new one for the next connection. Two reasons, both
+    /// seen on the Mac mini (macOS 27.2):
+    /// - a running smbd never answers the sleep notification, so every return to sleep
+    ///   waits out its 28-second timeout;
+    /// - a client that is still connected (the other Mac's unmount came five minutes
+    ///   late) woke the Mac again ten seconds after every sleep. Its session cannot
+    ///   outlive the sleep anyway, so ending it loses nothing the sleep would not.
+    private func endFileSharingDaemon() {
         _ = try? Shell.run("/usr/bin/killall", ["-TERM", "smbd"])
     }
 
