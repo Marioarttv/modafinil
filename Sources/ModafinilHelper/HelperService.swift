@@ -28,7 +28,13 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
             try self.setSystemSleepPreventionEnabled(false)
             self.activeLeaseIDs.removeAll()
             self.removeOwnershipMarker()
-        }, failureHint: { SleepBlockers.failureHint() })
+        }, failureHint: { SleepBlockers.failureHint() }, afterBackgroundWake: {
+            // An smbd left running after its clients disconnected never answers the
+            // sleep notification: every return to sleep then waits out its 28-second
+            // timeout (macOS 27.2). The first sleep keeps it, so a client that unmounts
+            // on the sleep notice can finish; launchd starts a new one on demand.
+            _ = try? Shell.run("/usr/bin/killall", ["-TERM", "smbd"])
+        })
     }()
     private let wakeScheduler = WakeScheduler()
     private lazy var powerMonitor = SystemPowerMonitor(callbackQueue: stateQueue)

@@ -120,6 +120,7 @@ public final class SleepCoordinator {
     private let failureHint: () -> String?
     private let snapshot: () -> PowerSnapshot?
     private let userIdle: () -> TimeInterval?
+    private let afterBackgroundWake: () -> Void
     private var lastUserIdle: TimeInterval?
     /// Input right after a sleep request is the click or tap that asked for it.
     private var inputGraceUntil: TimeInterval = 0
@@ -166,11 +167,13 @@ public final class SleepCoordinator {
                 save: @escaping (SleepJournal) throws -> Void = SleepJournalStore.write,
                 failureHint: @escaping () -> String? = { nil },
                 snapshot: @escaping () -> PowerSnapshot? = PowerSnapshot.read,
-                userIdle: @escaping () -> TimeInterval? = SystemUserActivity.idleSeconds) {
+                userIdle: @escaping () -> TimeInterval? = SystemUserActivity.idleSeconds,
+                afterBackgroundWake: @escaping () -> Void = {}) {
         self.journal = journal; self.now = now; self.continuous = continuous
         self.powerTimes = powerTimes; self.disablePrevention = disablePrevention
         self.requestSleep = requestSleep; self.save = save; self.failureHint = failureHint
         self.snapshot = snapshot; self.userIdle = userIdle
+        self.afterBackgroundWake = afterBackgroundWake
     }
 
     public func restore() throws {
@@ -378,6 +381,9 @@ public final class SleepCoordinator {
             // turning on a sleep-prevention lease for incidental Ethernet traffic.
             intent.returnAfter = time + 90
             lastUserIdle = userIdle()
+            // The Mac is meant to go back to sleep: let the helper clear what would
+            // slow that down (see HelperService).
+            afterBackgroundWake()
         }
         if intent.returnAfter != nil, let idle = userIdle() {
             if let previous = lastUserIdle, idle + 0.5 < previous {

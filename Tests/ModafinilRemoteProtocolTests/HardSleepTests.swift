@@ -138,6 +138,20 @@ final class HardSleepCoordinatorTests: XCTestCase {
         XCTAssertEqual(f.engine.journal.observedPowerEvents?.map(\.at), [2000, 2600, 2700, 2900])
     }
 
+    func testOnlyBackgroundWakesOfAnIntendedSleepAreTidiedUp() throws {
+        let f = Fixture(); try f.start(); f.sleepAndWake()
+        XCTAssertEqual(f.backgroundWakes, 1)
+        f.advance(10) // the same wake
+        XCTAssertEqual(f.backgroundWakes, 1)
+        f.sleepAndWake()
+        XCTAssertEqual(f.backgroundWakes, 2)
+
+        let used = Fixture(); try used.start(); used.reason = "HID Activity"; used.sleepAndWake()
+        XCTAssertEqual(used.backgroundWakes, 0)
+        let noIntent = Fixture(); noIntent.advance(5); noIntent.sleepAndWake()
+        XCTAssertEqual(noIntent.backgroundWakes, 0)
+    }
+
     func testObservedEventsAreNotDuplicatedByTheSleepIntent() throws {
         let f = Fixture(); try f.start(); f.sleepAndWake()
         let events = f.engine.journal.observedPowerEvents ?? []

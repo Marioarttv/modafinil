@@ -77,6 +77,12 @@ What 0.14.0 does:
   clocks and entered as "Asleep (background wakes not recorded)". After an app update the
   helper restarts itself once the old app has quit.
 
+- **Shorter background wakes.** An `smbd` left running after its clients disconnected
+  never answers macOS's sleep notification, so every return to sleep waited out its
+  28-second timeout (macOS 27.2). After a background wake of an intended sleep the helper
+  ends it; launchd starts a new one for the next connection. On the Mac mini this halved
+  each background wake (about 55 s to 28 s).
+
 The phone needs no update: protocol and pairing are unchanged.
 
 Limits: macOS still wakes a sleeping Mac in the background (maintenance, network); those

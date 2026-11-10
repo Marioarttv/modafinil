@@ -13,6 +13,7 @@ final class SleepIntentTests: XCTestCase {
         var saves = 0
         var failSave = false
         var failRequest = false
+        var backgroundWakes = 0
         var saved = SleepJournal()
         lazy var engine = make()
         func make(journal: SleepJournal = .init()) -> SleepCoordinator {
@@ -26,7 +27,7 @@ final class SleepIntentTests: XCTestCase {
                 }, snapshot: {
                     PowerSnapshot(slept: self.times.slept, woke: self.times.woke, boot: self.times.boot,
                         wakeReason: self.reason, capabilities: 0)
-                }, userIdle: { self.idle })
+                }, userIdle: { self.idle }, afterBackgroundWake: { self.backgroundWakes += 1 })
         }
         func advance(_ seconds: Double) { date.addTimeInterval(seconds); clock += seconds; idle += seconds; engine.tick() }
         func sleepAndWake() {
