@@ -379,3 +379,63 @@ public struct T3SleepWatch {
         waitStartedAt = nil
     }
 }
+
+/// "Shut down when T3 Code finishes": a shutdown cannot be undone from the phone, so it
+/// needs T3 to have worked since the rule was armed (the app started, the action was
+/// chosen, the rule was turned on, or a remote wake). A Mac switched on again with the
+/// power button, or woken remotely, is never shut down just because T3 is idle.
+public struct T3ShutdownGate: Equatable {
+    public let launchedAt: Date
+    public private(set) var armedAt: Date
+    public private(set) var sawWork = false
+    /// After a launch (a boot, usually), threads cut off by the last shutdown can still
+    /// read as working until T3 tidies them up: only a run requested since the launch
+    /// makes "seen working" count.
+    public private(set) var requiresNewRun: Bool
+
+    /// The app's launch: needs a run requested after it.
+    public init(armedAt: Date = Date(), requiresNewRun: Bool = true) {
+        self.launchedAt = armedAt
+        self.armedAt = armedAt
+        self.requiresNewRun = requiresNewRun
+    }
+
+    /// A setting change, wake or remote wake: T3 seen working from now on counts.
+    public mutating func arm(at date: Date = Date()) {
+        armedAt = date
+        sawWork = false
+    }
+
+    /// T3 was seen working (or waiting) at a check after arming. An unreadable database
+    /// counts as busy for sleeping, but never as proof that T3 worked.
+    public mutating func note(_ activity: T3Activity?) {
+        guard !requiresNewRun else { return }
+        if case .busy(let threads)? = activity, !threads.isEmpty { sawWork = true }
+    }
+
+    /// A run requested after arming counts even if it ended between two checks.
+    /// A run already going when the rule is armed counts once T3 is seen working.
+    public mutating func noteLatestRun(requestedAt date: Date?) {
+        guard let date else { return }
+        if date > launchedAt { requiresNewRun = false }
+        if date > armedAt { sawWork = true }
+    }
+
+    public var allowsShutdown: Bool { sawWork }
+
+    public enum Decision: Equatable {
+        case shutDown
+        /// Not yet; the text (if any) says why, for the T3 status line.
+        case hold(String?)
+    }
+
+    /// The final check once T3 has stayed finished through the grace period.
+    public func decide(keepAwakeJobs: [String], isShuttingDown: Bool) -> Decision {
+        if isShuttingDown { return .hold(nil) }
+        guard allowsShutdown else { return .hold(nil) }
+        guard keepAwakeJobs.isEmpty else {
+            return .hold("waiting for \(keepAwakeJobs.prefix(2).joined(separator: ", ")) to finish")
+        }
+        return .shutDown
+    }
+}

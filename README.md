@@ -28,6 +28,42 @@ Opening Modafinil from Launchpad or Finder shows the same controls in a regular 
 
 The menu also includes "Sleep When T3 Threads Finish (Lid Closed)", described below, and an "Only While Codex Is Running" option. When enabled, Modafinil keeps sleep prevention requested but only applies it while a Codex app or `codex` command is running.
 
+## Remote shutdown (Mac 0.13.0 / Companion 1.12)
+
+Modafinil can turn a Mac off completely, from the iPhone, from another Mac
+(**Other Macs → Shut Down**) or on its own:
+
+- **Shut Down Now** (iPhone, Other Macs, `Modafinil --remote-mac shutdown <name> --yes`).
+- **Shutdown timer**: the timer card's *Sleep / Shut Down* choice. One power-down timer
+  at a time; a shutdown timer replaces a sleep timer and the other way round. It belongs to
+  the current boot, is cancelled by quitting Modafinil or logging out, and never fires late: a Mac that
+  slept through the time stays on.
+- **When T3 Code finishes: Shut Down**: the T3 rule's *Then* choice. It shuts down only after
+  T3 has been seen working since the rule was armed: Modafinil started, the choice or the
+  switch changed, any wake from sleep, or a remote Wake & Keep Awake. A run already going
+  then counts, except after Modafinil starts, when only a run started since does. So a Mac
+  switched on again is never shut down just because T3 is idle. It is one-time: when it
+  shuts the Mac down, "Sleep when T3 Code finishes" turns itself off (its action back to
+  Sleep), so the Mac comes back on with the rule off. Any other shutdown while the rule is
+  set to Shut Down turns it off too. Turn it on again when wanted. It also waits while a command-line
+  process holds a sleep assertion (anything run under `caffeinate -i`, for example); the T3
+  status names it and `Modafinil --t3-activity` lists them. A job that holds no assertion
+  (a render started with `nohup` or in `tmux` after its T3 thread finished, a plain
+  `ffmpeg` over SSH) is not seen and is ended by the shutdown: run such jobs under
+  `caffeinate -i` on a Mac that shuts down after T3.
+
+A shutdown asks every app to quit like ⌘Q, waits up to 30 seconds, then the helper runs
+`shutdown -h now`, which ends whatever is still open (unsaved work there is lost). Before
+that, Macs that mount this one get the usual sleep notice and unmount. The Mac answers the
+phone first, so the phone shows the shutdown as started.
+
+**A shut-down Mac stays off until someone presses its power button.** Apple silicon Macs
+do not start from Wake-on-LAN, so neither the iPad relay nor wake alarms can turn it on.
+Every shutdown control says so before it runs. Commands need protocol v8, which older
+phones and Macs do not send, so an older Companion can never shut a Mac down. An older
+phone or Mac (protocol v4–v7) shows a shutdown timer as a sleep timer; cancelling it there
+still cancels it. Another Mac shows this one as off only if it sent the shutdown itself.
+
 ## Sleep intent and quiet observers (Mac 0.12.1 / Companion 1.11)
 
 An explicit sleep saves a helper-owned intent to stay asleep. A network or

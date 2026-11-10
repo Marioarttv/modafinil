@@ -166,6 +166,52 @@ final class PrivilegedHelperClient {
         }
     }
 
+    func canShutDown(completion: @escaping (Result<Void, Error>) -> Void) {
+        var didComplete = false
+        let finish: (Result<Void, Error>) -> Void = { result in
+            DispatchQueue.main.async {
+                guard !didComplete else { return }
+                didComplete = true
+                completion(result)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + requestTimeout) {
+            finish(.failure(HelperError("The helper did not answer. Open Modafinil on this Mac so it updates its helper.")))
+        }
+        remoteProxy { result in
+            switch result {
+            case .failure(let error): finish(.failure(HelperError("Could not reach the helper (\(error.localizedDescription)). Open Modafinil on this Mac; it may need to update its helper.")))
+            case .success(let proxy):
+                proxy.canShutDown { success, message in
+                    finish(success ? .success(()) : .failure(HelperError(message ?? "The helper cannot shut the Mac down.")))
+                }
+            }
+        }
+    }
+
+    func shutDownNow(completion: @escaping (Result<Void, Error>) -> Void) {
+        var didComplete = false
+        let finish: (Result<Void, Error>) -> Void = { result in
+            DispatchQueue.main.async {
+                guard !didComplete else { return }
+                didComplete = true
+                completion(result)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + requestTimeout) {
+            finish(.failure(HelperError("The helper did not confirm the shutdown. Update Modafinil and its helper on this Mac.")))
+        }
+        remoteProxy { result in
+            switch result {
+            case .failure(let error): finish(.failure(error))
+            case .success(let proxy):
+                proxy.shutDownNow { success, message in
+                    finish(success ? .success(()) : .failure(HelperRefused(message: message ?? "The helper could not shut the Mac down.")))
+                }
+            }
+        }
+    }
+
     func invalidate() {
         connection?.invalidate()
         connection = nil
@@ -210,6 +256,12 @@ final class PrivilegedHelperClient {
         }
         connection.resume()
         return connection
+    }
+
+    /// The helper answered and refused (as opposed to no answer at all).
+    struct HelperRefused: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
     }
 
     struct HelperError: LocalizedError {
