@@ -34,34 +34,41 @@ Until 0.14.0 a sleep request on mains power often never reached sleep. macOS ans
 with a display-off "DarkWake" (CPU on, network up) and stayed there, and Sleep History
 showed the Mac awake. Found on 2026-11-10: the Mac mini had not slept once in two days
 (`kern.sleeptime` was 0), and the MacBook sat in DarkWake for hours whenever it was plugged
-in with the lid closed. Three kinds of power assertion do this on mains power only (on
+in with the lid closed. Two kinds of power assertion do this on mains power only (on
 battery macOS ignores them itself):
 
 - `NetworkClientActive`: a connected File Sharing client (the other Mac's mounted share);
-- `PreventSystemSleep`: `caffeinate -s`, or an app;
-- `BackgroundTask`: macOS background work while Power Nap is on (Photos analysis and so on).
+- `PreventSystemSleep`: `caffeinate -s`, or an app.
+
+(`BackgroundTask`, macOS background work with Power Nap on, has the same effect only
+during a Power Nap wake; powerd keeps its own disable on that type the rest of the time,
+so Modafinil leaves it alone.)
 
 What 0.14.0 does:
 
 - **Hard sleep.** From a sleep request until that sleep is over, the helper switches those
-  three assertion types off system-wide with powerd's root-only switch
+  two assertion types off system-wide with powerd's root-only switch
   (`pmset disableassertion <type>`). The switch kills nothing and stops no service; the
   assertions simply do not count while the Mac is meant to sleep. A wake you asked for
   (Wake & Keep Awake, the keyboard or mouse, the lid), a failed request, or quitting
-  Modafinil switches them back on, and quitting or uninstalling reports it if that failed.
-  powerd counts disables and forgets them when it restarts, so the helper enables a type
-  once before each disable (the count is then exactly one, whatever a crash or a powerd
-  restart left behind), does so again for every sleep attempt, and keeps
+  Modafinil switches them back on; the helper retries by itself if that fails, and an
+  uninstall stops with a message until it has worked. powerd counts disables and forgets
+  them when it restarts, so the helper enables a type once before each disable (the count
+  is then exactly one, whatever a crash or a powerd restart left behind; if the enable
+  fails, the disable waits), does so again for every sleep attempt, and keeps
   `/Library/Application Support/Modafinil/sleep-enforcement.json` while types may be off,
   so a restarted helper gives them back.
 - **A job started during a background wake ends the sleep.** The blockers that existed
-  when you asked for sleep are overridden. If a command-line job that asks macOS to stay
-  awake (`caffeinate -s`, for example over SSH) starts during a later background wake, the
-  sleep intent ends, the blockers count again and the Mac stays awake for it.
+  when you asked for sleep are overridden. If someone then starts a command-line job that
+  asks macOS to stay awake (`caffeinate -s` over SSH, in tmux or in a terminal) during a
+  later background wake, the sleep intent ends, the blockers count again and the Mac stays
+  awake for it. The next step of a script that was already running, and anything a
+  launchd job or a daemon starts on its own, does not count.
 - **Time for the phone after a wake.** With nothing holding it, macOS ends a background
-  wake after about 25 seconds. The helper holds each background wake of an intended sleep
-  open for 45 seconds so Wake & Keep Awake can arrive over Wi-Fi and Tailscale; the phone's
-  relay request repeats every 10 seconds as before.
+  wake after about 25 seconds. On mains power the helper holds each background wake of an
+  intended sleep open for 45 seconds so Wake & Keep Awake can arrive over Wi-Fi and
+  Tailscale (macOS ignores the hold on battery, where Wake-on-LAN is off anyway); the
+  phone's relay request repeats every 10 seconds as before.
 - **Quit Sunshine before sleep** (Settings → Before sleeping, on by default, shown when
   Sunshine is installed). A Mac that streams to Moonlight cannot stay asleep: the stream
   keeps it awake, the client's input counts as someone using the Mac, and an open Moonlight
@@ -84,14 +91,15 @@ What 0.14.0 does:
   explicit sleep (iPhone, another Mac, a timer, Sleep Now) does not wait, and Sleep History
   notes which job it overrode.
 - **Complete Sleep History.** The helper now stays running and notes every sleep and wake
-  itself (two sysctls every 5 seconds while the Mac is awake); before, the app missed most
+  itself (a few sysctls every 5 seconds while the Mac is awake); before, the app missed most
   background wakes and showed a Mac that slept all day as awake. Sleep that nobody saw
   (wakes too short to sample, or the helper not running) is measured from macOS's two
   clocks and entered as "Asleep (background wakes not recorded)": first where the Mac was
-  last seen in a background wake, then before the first recorded sleep; the total is
-  exact, the placement is a best estimate. After an app update the new app asks the old
-  helper to make room, and a helper without clients exits by itself once its executable
-  has been replaced. (An update from 0.13.0 or earlier still needs the old helper's
+  last seen in a background wake, then before the first recorded sleep; it never adds
+  more than the clocks measured, and the placement is a best estimate. After an app
+  update the new app first asks the old helper to make room and waits for it before using
+  the helper, and a helper without clients exits by itself once its executable has been
+  replaced. (An update from 0.13.0 or earlier still needs the old helper's
   15-second idle exit: quit the app, replace it, wait, then open it.)
 
 - **File Sharing lets go when the Mac returns to sleep.** If no Wake & Keep Awake has
@@ -142,7 +150,9 @@ phone first, so the phone shows the shutdown as started.
 do not start from Wake-on-LAN, so the iPad relay cannot turn it on. Since Mac 0.14.0 the
 wake alarm (**Wake At…** on the iPhone, **Wake Timer** on the Mac) is a "wake or power on"
 event: set before the shutdown, it starts the Mac again at that time, and Modafinil turns
-keep-awake on as after any wake alarm. Checked on the Mac mini on 2026-11-10 (shut down
+keep-awake on as after any wake alarm, provided it is running within 5 minutes of the
+alarm (it opens at login). An alarm saved by 0.13.0 becomes such an event the next time
+Modafinil 0.14.0 starts. Checked on the Mac mini on 2026-11-10 (shut down
 22:47, started by the scheduled event 22:57). It needs mains power; a Mac with FileVault
 stops at its login screen. Without an alarm someone has to press the power button, and
 every shutdown control says so before it runs. Commands need protocol v8, which older

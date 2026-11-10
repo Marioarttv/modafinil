@@ -44,6 +44,9 @@ public struct SleepIntent: Codable, Equatable {
     public var lastWake: TimeInterval
     public var returnAfter: TimeInterval?
     public var returns: [TimeInterval] = []
+    /// Keep-awake jobs someone had started when sleep was requested, with their parent
+    /// processes. The request overrode those. Saved, so a restarted helper still knows.
+    public var knownJobs: [Int32]? = nil
 }
 
 public struct SystemSleepTimes {
@@ -122,7 +125,9 @@ public final class SleepCoordinator {
     private let userIdle: () -> TimeInterval?
     private let backgroundWakeBegan: () -> Void
     private let backgroundWakeSettled: () -> Void
-    private let keepAwakeJobs: () -> Set<Int32>
+    /// Command-line jobs someone started that ask macOS to stay awake: process → its
+    /// parent processes.
+    private let keepAwakeJobs: () -> [Int32: Set<Int32>]
     private var lastUserIdle: TimeInterval?
     /// Input right after Sleep Now on this Mac is the click that asked for it.
     private var inputGraceUntil: TimeInterval = 0
@@ -132,10 +137,7 @@ public final class SleepCoordinator {
     /// Just before the helper's 45-second hold on a background wake ends and macOS
     /// returns to sleep: a Wake & Keep Awake that arrives earlier ends the intent first.
     public static let settleDelay: TimeInterval = 40
-    /// Command-line jobs that already asked macOS to stay awake when sleep was requested.
-    /// The request overrode those; one that starts during a later background wake did
-    /// not exist then, and ends the intent instead of being slept over.
-    private var jobsAtRequest: Set<Int32>?
+
     /// Kernel stamps last turned into history events (0 until the first look).
     private var observed: (slept: TimeInterval, woke: TimeInterval)?
     public var hasWork: Bool { journal.intent != nil || journal.schedule != nil || journal.attempt?.phase == .pending }
@@ -179,7 +181,7 @@ public final class SleepCoordinator {
                 failureHint: @escaping () -> String? = { nil },
                 snapshot: @escaping () -> PowerSnapshot? = PowerSnapshot.read,
                 userIdle: @escaping () -> TimeInterval? = SystemUserActivity.idleSeconds,
-                keepAwakeJobs: @escaping () -> Set<Int32> = { [] },
+                keepAwakeJobs: @escaping () -> [Int32: Set<Int32>] = { [:] },
                 backgroundWakeBegan: @escaping () -> Void = {},
                 backgroundWakeSettled: @escaping () -> Void = {}) {
         self.journal = journal; self.now = now; self.continuous = continuous
@@ -266,7 +268,7 @@ public final class SleepCoordinator {
             journal.intent = SleepIntent(boot: times.boot, lastSleep: times.slept, lastWake: times.woke)
             lastUserIdle = userIdle()
             inputGraceUntil = time + inputGrace
-            jobsAtRequest = keepAwakeJobs()
+            journal.intent?.knownJobs = Self.family(keepAwakeJobs())
             settleAt = nil
         }
         journal.schedule = nil
@@ -408,10 +410,13 @@ public final class SleepCoordinator {
         }
         if intent.returnAfter != nil {
             // Someone started a job that asks macOS to stay awake (over SSH, say) during
-            // this wake: they want the Mac on. Sleep blockers count again at once.
-            let known = jobsAtRequest ?? keepAwakeJobs()
-            jobsAtRequest = known
-            if !keepAwakeJobs().subtracting(known).isEmpty {
+            // this wake: they want the Mac on, and sleep blockers count again at once.
+            // A job that belongs to one the request overrode (the next step of the same
+            // script, for example) does not count: it shares a parent with it.
+            let jobs = keepAwakeJobs()
+            let known = Set(intent.knownJobs ?? Self.family(jobs)) // journals from before 0.14.0
+            if intent.knownJobs == nil { intent.knownJobs = known.sorted() }
+            if jobs.contains(where: { !known.contains($0.key) && $0.value.isDisjoint(with: known) }) {
                 journal.intent = nil
                 lastUserIdle = nil
                 settleAt = nil
@@ -476,6 +481,10 @@ public final class SleepCoordinator {
         }
         observed = (max(last.slept, times.slept), max(last.woke, times.woke))
         if journal.observedPowerEvents != before { try? persist() }
+    }
+
+    static func family(_ jobs: [Int32: Set<Int32>]) -> [Int32] {
+        jobs.reduce(into: Set<Int32>()) { $0.insert($1.key); $0.formUnion($1.value) }.sorted()
     }
 
     private func recordPowerEvent(_ event: PowerEvent) {

@@ -11,6 +11,7 @@ final class SleepEnforcementTests: XCTestCase {
         var counts: [String: Int] = [:]
         var failing: Set<String> = []
         var failEnable = false
+        var failEnableOnce: Set<String> = []
         var calls = 0
         func make() -> SleepEnforcement {
             SleepEnforcement(markerURL: url, bootSession: { self.boot }, setType: { type, disabled in
@@ -19,6 +20,7 @@ final class SleepEnforcementTests: XCTestCase {
                     if self.failing.contains(type) { throw SleepError("refused") }
                     self.counts[type, default: 0] += 1
                 } else {
+                    if self.failEnableOnce.remove(type) != nil { throw SleepError("busy") }
                     if self.failEnable { throw SleepError("refused") }
                     self.counts[type] = max(0, self.counts[type, default: 0] - 1)
                 }
@@ -50,7 +52,7 @@ final class SleepEnforcementTests: XCTestCase {
         var second = f.make() // the first helper died with the types disabled
         XCTAssertTrue(second.isEngaged); XCTAssertFalse(second.isFullyApplied)
         XCTAssertNil(second.set(engaged: true))
-        XCTAssertEqual(f.maxCount, 1); XCTAssertEqual(f.disabled.count, 3)
+        XCTAssertEqual(f.maxCount, 1); XCTAssertEqual(f.disabled.count, 2)
         var third = f.make()
         XCTAssertNil(third.set(engaged: false))
         XCTAssertEqual(f.disabled, []); XCTAssertFalse(f.markerExists)
@@ -64,17 +66,34 @@ final class SleepEnforcementTests: XCTestCase {
             .write(to: f.url)
         var e = f.make()
         XCTAssertNil(e.set(engaged: true))
-        XCTAssertEqual(f.disabled.count, 3); XCTAssertEqual(f.maxCount, 1)
+        XCTAssertEqual(f.disabled.count, 2); XCTAssertEqual(f.maxCount, 1)
     }
 
     func testFailedDisableIsRetriedByTheNextCall() {
         let f = Fixture(); var e = f.make()
-        f.failing = ["BackgroundTask"]
+        f.failing = ["NetworkClientActive"]
         XCTAssertNotNil(e.set(engaged: true))
-        XCTAssertFalse(e.isFullyApplied); XCTAssertEqual(f.disabled.count, 2)
+        XCTAssertFalse(e.isFullyApplied); XCTAssertEqual(f.disabled.count, 1)
         f.failing = []
         XCTAssertNil(e.set(engaged: true))
-        XCTAssertTrue(e.isFullyApplied); XCTAssertEqual(f.disabled.count, 3); XCTAssertEqual(f.maxCount, 1)
+        XCTAssertTrue(e.isFullyApplied); XCTAssertEqual(f.disabled.count, 2); XCTAssertEqual(f.maxCount, 1)
+    }
+
+    func testAFailedEnableNeverLeadsToASecondDisable() {
+        let f = Fixture(); var e = f.make(); e.set(engaged: true)
+        e.reassert()
+        f.failEnableOnce = ["NetworkClientActive"] // powerd busy for one call
+        XCTAssertNotNil(e.set(engaged: true))
+        XCTAssertEqual(f.maxCount, 1); XCTAssertFalse(e.isFullyApplied)
+        XCTAssertNil(e.set(engaged: true)) // the retry
+        XCTAssertEqual(f.maxCount, 1); XCTAssertTrue(e.isFullyApplied)
+        XCTAssertNil(e.set(engaged: false))
+        XCTAssertEqual(f.disabled, [])
+    }
+
+    func testOnlyTypesThatPowerdDoesNotCountItselfAreManaged() {
+        // powerd keeps its own disable on BackgroundTask outside Power Nap wakes.
+        XCTAssertEqual(SleepEnforcement.assertionTypes, ["PreventSystemSleep", "NetworkClientActive"])
     }
 
     func testReassertRepairsAPowerdRestartWithoutDoubleCounting() {
@@ -83,7 +102,7 @@ final class SleepEnforcementTests: XCTestCase {
         XCTAssertNil(e.set(engaged: true)); XCTAssertEqual(f.disabled, []) // not noticed by itself
         e.reassert()
         XCTAssertNil(e.set(engaged: true))
-        XCTAssertEqual(f.disabled.count, 3)
+        XCTAssertEqual(f.disabled.count, 2)
         e.reassert(); XCTAssertNil(e.set(engaged: true)) // powerd did not restart this time
         XCTAssertEqual(f.maxCount, 1)
         XCTAssertNil(e.set(engaged: false)); XCTAssertEqual(f.disabled, [])
@@ -106,7 +125,7 @@ final class SleepEnforcementTests: XCTestCase {
         XCTAssertNil(afterReboot.set(engaged: false))
         XCTAssertEqual(f.calls, 0); XCTAssertFalse(f.markerExists)
         XCTAssertNil(afterReboot.set(engaged: true)) // and a new sleep works as usual
-        XCTAssertEqual(f.disabled.count, 3)
+        XCTAssertEqual(f.disabled.count, 2)
     }
 
     func testUnknownBootSessionStillGivesTheTypesBack() {
@@ -117,7 +136,7 @@ final class SleepEnforcementTests: XCTestCase {
         XCTAssertEqual(f.disabled, []); XCTAssertFalse(f.markerExists)
 
         let g = Fixture(); g.boot = nil; var h = g.make()
-        XCTAssertNil(h.set(engaged: true)); XCTAssertEqual(g.disabled.count, 3)
+        XCTAssertNil(h.set(engaged: true)); XCTAssertEqual(g.disabled.count, 2)
         XCTAssertNil(h.set(engaged: false)); XCTAssertEqual(g.disabled, [])
     }
 }
@@ -170,17 +189,51 @@ final class HardSleepCoordinatorTests: XCTestCase {
     }
 
     func testAJobStartedDuringABackgroundWakeEndsTheIntentButAnOverriddenOneDoesNot() throws {
-        let f = Fixture(); f.jobs = [41] // running when sleep was requested: overridden
+        let f = Fixture(); f.jobs = [41: [40, 30]] // running when sleep was requested: overridden
         try f.start(); f.sleepAndWake()
+        XCTAssertEqual(f.engine.journal.intent?.knownJobs, [30, 40, 41])
         f.advance(20)
         XCTAssertNotNil(f.engine.journal.intent)
-        f.jobs = [41, 77] // someone started a render over SSH during the wake
+        f.jobs = [41: [40, 30], 77: [76, 75]] // someone started a render over SSH during the wake
         f.advance(1)
         XCTAssertNil(f.engine.journal.intent)
         XCTAssertFalse(f.engine.wantsSleepEnforcement)
         XCTAssertEqual(f.engine.journal.observedPowerEvents?.last?.kind, .note)
         f.advance(120)
         XCTAssertEqual(f.requests, 1) // never slept over
+    }
+
+    func testTheNextStepOfAnOverriddenScriptIsNotANewJob() throws {
+        // for f in …; do caffeinate -s ffmpeg …; done: each step is a new process
+        // under the same shell (40).
+        let f = Fixture(); f.jobs = [41: [40, 30]]
+        try f.start(); f.sleepAndWake()
+        f.jobs = [58: [40, 30]]
+        f.advance(30)
+        XCTAssertNotNil(f.engine.journal.intent)
+        f.advance(60); f.advance(2)
+        XCTAssertEqual(f.requests, 2) // back to sleep as asked
+    }
+
+    func testARestartedHelperStillKnowsWhichJobsTheRequestOverrode() throws {
+        let f = Fixture(); f.jobs = [41: [40]]
+        try f.start(); f.sleepAndWake()
+        f.jobs = [41: [40], 77: [76]] // starts during the wake, then the helper restarts
+        f.engine = f.make(journal: f.saved)
+        try f.engine.restore()
+        f.advance(1)
+        XCTAssertNil(f.engine.journal.intent)
+        XCTAssertEqual(f.requests, 1)
+    }
+
+    func testAJournalWithoutKnownJobsAdoptsTheOnesRunning() throws {
+        let f = Fixture(); try f.start(); f.sleepAndWake()
+        var old = f.saved; old.intent?.knownJobs = nil // written before 0.14.0
+        f.jobs = [41: [40]]
+        f.engine = f.make(journal: old)
+        try f.engine.restore(); f.advance(1)
+        XCTAssertEqual(f.engine.journal.intent?.knownJobs, [40, 41])
+        XCTAssertNotNil(f.engine.journal.intent)
     }
 
     func testBackgroundWakeIsTidiedUpOnceJustBeforeTheMacReturnsToSleep() throws {
@@ -290,6 +343,16 @@ final class HiddenSleepTests: XCTestCase {
         XCTAssertEqual(added.map(\.at), [2000])
         // Nothing recorded at all: there is no place to put it, so nothing is invented.
         XCTAssertEqual(HiddenSleep.missingSleep(events: [], since: 100, now: 1100, asleep: 600), [])
+    }
+
+    func testALookDuringABackgroundWakeMakesTheFirstStretchTheLikelyOne() {
+        // Last look in a background wake at t=0; then unseen cycles until a recorded
+        // sleep at 5000; a full wake, real use, and another recorded sleep.
+        let events = [PowerEvent(kind: .sleep, at: 5000), PowerEvent(kind: .wake, at: 5100, dark: false),
+                      PowerEvent(kind: .sleep, at: 9000), PowerEvent(kind: .wake, at: 9100, dark: false)]
+        let added = HiddenSleep.missingSleep(events: events, since: 0, sinceInBackgroundWake: true,
+                                             now: 9101, asleep: 200 + 4000)
+        XCTAssertEqual(added.map(\.at), [1000]) // 1000…5000, not the 3900 s of use after the full wake
     }
 
     func testMissingSleepNeverStartsBeforeTheLastLookAndIgnoresOlderEvents() {

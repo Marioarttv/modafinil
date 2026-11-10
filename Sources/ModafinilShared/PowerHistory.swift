@@ -404,8 +404,8 @@ public struct PowerRecorderState: Equatable {
 /// Sleep the recorders did not see. macOS keeps two clocks, one that stops while the
 /// Mac sleeps and one that does not; their difference is the exact time spent asleep.
 /// When more of it passed between two looks than the recorded sleeps explain (wakes too
-/// short to be sampled, or the helper not running), the rest is entered as one sleep, so
-/// a Mac that slept all day is never shown as awake.
+/// short to be sampled, or the helper not running), the rest is entered as sleep where
+/// the record leaves room for it, so a Mac that slept all day is never shown as awake.
 public enum HiddenSleep {
     public static let reason = "Asleep (background wakes not recorded)"
     /// Shorter gaps are clock and sampling noise.
@@ -421,17 +421,20 @@ public enum HiddenSleep {
     /// - Parameters:
     ///   - events: everything recorded so far, including the wake being handled.
     ///   - since: when the recorder last looked (the Mac was awake then).
+    ///   - sinceInBackgroundWake: that look was during a background wake.
     ///   - asleep: seconds the clocks say the Mac slept between `since` and `now`.
     /// - Returns: sleep events that cover the unrecorded part: each ends at the next
-    ///   recorded event, and together they last as long as the sleep that is missing.
-    public static func missingSleep(events: [PowerEvent], since: Double, now: Double, asleep: Double) -> [PowerEvent] {
+    ///   recorded event, and together they last at most as long as the sleep that is
+    ///   missing (less when the record leaves no room for all of it).
+    public static func missingSleep(events: [PowerEvent], since: Double, sinceInBackgroundWake: Bool = false,
+                                    now: Double, asleep: Double) -> [PowerEvent] {
         let window = events.filter { ($0.kind == .sleep || $0.kind == .wake) && $0.at > since && $0.at <= now }
             .sorted { $0.at < $1.at }
         // Stretches the record shows as not asleep. Unseen sleep can only be in these.
         var gaps: [(start: Double, end: Double, afterBackgroundWake: Bool)] = []
         var recorded = 0.0
         var cursor = since
-        var afterBackgroundWake = false
+        var afterBackgroundWake = sinceInBackgroundWake
         var sleptAt: Double?
         for event in window {
             if event.kind == .sleep {

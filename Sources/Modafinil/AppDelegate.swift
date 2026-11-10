@@ -171,16 +171,20 @@ final class AppDelegate: NSObject,
         refreshCodexRuntimeState(shouldReconcile: false)
         updateCodexRuntimeMonitoring()
         refreshHelperStatus()
-        // After an update the helper of the previous version may still be running.
-        if helperStatus == .enabled {
-            helperClient.retireIfReplaced { [weak self] retired in
-                guard retired, let self else { return }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-                    self?.refreshSleepStatus()
-                    self?.synchronizeSleepJournal()
-                }
-            }
+        // After an update the helper of the previous version may still be running. It is
+        // asked to make room before anything else is asked of the helper, so no lease or
+        // sleep request is granted by a process that is about to exit.
+        guard helperStatus == .enabled else {
+            finishLaunching()
+            return
         }
+        helperClient.retireIfReplaced { [weak self] retired in
+            // The old helper exits 0.2 s after agreeing; launchd then starts the new one.
+            DispatchQueue.main.asyncAfter(deadline: .now() + (retired ? 0.6 : 0)) { self?.finishLaunching() }
+        }
+    }
+
+    private func finishLaunching() {
         refreshSleepStatus()
         synchronizeSleepJournal()
         registerJournalNotification()
@@ -651,7 +655,14 @@ final class AppDelegate: NSObject,
     }
 
     private func disableSleepPreventionForUninstall(completion: @escaping (Result<Void, Error>) -> Void) {
-        restoreNormalSleepBehavior(completion: completion)
+        restoreNormalSleepBehavior { [weak self] result in
+            guard let self, case .success = result, self.helperStatus == .enabled else {
+                completion(result)
+                return
+            }
+            // Once the helper is unregistered nothing could switch sleep blockers back on.
+            self.helperClient.confirmSleepBlockersRestored(completion: completion)
+        }
     }
 
     private func restoreNormalSleepBehavior(completion: @escaping (Result<Void, Error>) -> Void) {
@@ -1535,7 +1546,14 @@ final class AppDelegate: NSObject,
         let saved = UserDefaults.standard.double(forKey: Self.scheduledWakeDefaultsKey)
         if saved > 0 { scheduledWakeDate = Date(timeIntervalSince1970: saved) }
         synchronizeWakeSchedule()
-        if !completeScheduledWakeIfDue() { armScheduledWakeTimer() }
+        if !completeScheduledWakeIfDue() {
+            armScheduledWakeTimer()
+            // An alarm saved by 0.13.0 only wakes. Saving it again makes it a
+            // wake-or-power-on event (the helper replaces its own older event).
+            if let date = scheduledWakeDate, date.timeIntervalSinceNow > 90, helperStatus == .enabled {
+                helperClient.setScheduledWake(date.timeIntervalSince1970) { _ in }
+            }
+        }
     }
 
     private func synchronizeWakeSchedule(force: Bool = false) {

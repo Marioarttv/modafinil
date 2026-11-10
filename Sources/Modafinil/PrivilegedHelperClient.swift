@@ -131,6 +131,30 @@ final class PrivilegedHelperClient {
         }
     }
 
+    /// Before uninstalling: the sleep blockers a sleep switched off count again.
+    func confirmSleepBlockersRestored(completion: @escaping (Result<Void, Error>) -> Void) {
+        var didComplete = false
+        let finish: (Result<Void, Error>) -> Void = { result in
+            DispatchQueue.main.async {
+                guard !didComplete else { return }
+                didComplete = true
+                completion(result)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + requestTimeout) {
+            finish(.failure(HelperError("The helper did not confirm that sleep blockers are back in effect.")))
+        }
+        remoteProxy { result in
+            switch result {
+            case .failure(let error): finish(.failure(error))
+            case .success(let proxy):
+                proxy.confirmSleepBlockersRestored { success, message in
+                    finish(success ? .success(()) : .failure(HelperError(message ?? "Sleep blockers could not be switched back on.")))
+                }
+            }
+        }
+    }
+
     /// - Parameter local: Sleep Now at this Mac (the click must not cancel it).
     func sleepAfterDisablingSleepPrevention(
         local: Bool = false,

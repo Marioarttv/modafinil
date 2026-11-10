@@ -4,20 +4,23 @@ import Foundation
 ///
 /// On AC, macOS answers a sleep request with a display-off "DarkWake" that never
 /// reaches sleep while certain power assertions are held: a connected File Sharing
-/// client (`NetworkClientActive`), `caffeinate -s` or an app (`PreventSystemSleep`),
-/// and macOS background tasks with Power Nap on (`BackgroundTask`). On battery macOS
-/// ignores all three itself. powerd has a root-only switch that takes an assertion type
+/// client (`NetworkClientActive`) and `caffeinate -s` or an app (`PreventSystemSleep`).
+/// On battery macOS ignores both itself. (`BackgroundTask` has the same effect only
+/// during a Power Nap wake, and powerd keeps its own disable on that type the rest of
+/// the time, on the same counter; Modafinil leaves it alone.) powerd has a root-only switch that takes an assertion type
 /// out of effect system-wide (`pmset disableassertion <type>`); nothing is killed and no
 /// service is stopped. Modafinil holds the switch from a sleep request until that sleep
 /// is over (a wake the user asked for, or the request failing), then gives it back.
 ///
 /// powerd counts disables per type and forgets them when it restarts; enabling a type
-/// that is not disabled does nothing. Modafinil is the only user of the switch, so before
-/// every disable it enables the type once: whatever an interrupted run, an earlier helper
-/// process or a restarted powerd left behind, the count is then exactly one. A marker
+/// that is not disabled does nothing. Nothing else uses the switch for these two types
+/// (powerd itself only for `BackgroundTask`), so before every disable Modafinil enables
+/// the type once: whatever an interrupted run, an earlier helper process or a restarted
+/// powerd left behind, the count is then exactly one. If that enable fails, the disable
+/// is not attempted, so a count can never go above one. A marker
 /// file records that types may be disabled, so a restarted helper gives them back.
 public struct SleepEnforcement {
-    public static let assertionTypes = ["PreventSystemSleep", "NetworkClientActive", "BackgroundTask"]
+    public static let assertionTypes = ["PreventSystemSleep", "NetworkClientActive"]
     public static let defaultMarkerURL = URL(
         fileURLWithPath: "/Library/Application Support/Modafinil/sleep-enforcement.json")
 
@@ -71,9 +74,11 @@ public struct SleepEnforcement {
         isEngaged = true
         var failures: [String] = []
         for type in Self.assertionTypes where !applied.contains(type) {
-            try? setType(type, false) // back to a count of zero, whatever was left behind
-            do { try setType(type, true); applied.insert(type) }
-            catch { failures.append("\(type): \(error.localizedDescription)") }
+            do {
+                try setType(type, false) // back to a count of zero, whatever was left behind
+                try setType(type, true)
+                applied.insert(type)
+            } catch { failures.append("\(type): \(error.localizedDescription)") }
         }
         return failures.isEmpty ? nil : "Could not switch off some sleep blockers (\(failures.joined(separator: "; "))). Retrying."
     }

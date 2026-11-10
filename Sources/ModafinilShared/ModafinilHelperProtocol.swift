@@ -15,6 +15,11 @@ public protocol ModafinilHelperProtocol {
     @objc(retireIfReplacedWithReply:)
     func retireIfReplaced(withReply reply: @escaping (Bool) -> Void)
 
+    /// Asked before the helper is unregistered (0.14.0): true once the sleep blockers
+    /// that a sleep switched off count again.
+    @objc(confirmSleepBlockersRestoredWithReply:)
+    func confirmSleepBlockersRestored(withReply reply: @escaping (Bool, String?) -> Void)
+
     @objc(setSleepTimerAfter:withReply:)
     func setSleepTimer(after seconds: Double, withReply reply: @escaping (Bool, String?) -> Void)
 

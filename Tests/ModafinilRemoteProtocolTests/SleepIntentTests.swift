@@ -15,7 +15,8 @@ final class SleepIntentTests: XCTestCase {
         var failRequest = false
         var backgroundWakes = 0
         var settled = 0
-        var jobs: Set<Int32> = []
+        /// Keep-awake jobs someone started: process → parent processes.
+        var jobs: [Int32: Set<Int32>] = [:]
         var saved = SleepJournal()
         lazy var engine = make()
         func make(journal: SleepJournal = .init()) -> SleepCoordinator {
