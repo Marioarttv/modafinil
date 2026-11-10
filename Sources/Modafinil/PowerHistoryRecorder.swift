@@ -49,10 +49,8 @@ final class PowerHistoryRecorder {
         defer { lastLook = (now, asleep) }
         // A smaller total means a restart; the boot event covers that gap.
         guard let last = lastLook, asleep >= last.asleep else { return }
-        if let event = HiddenSleep.missingSleep(events: events, since: last.at, now: now,
-                                                asleep: asleep - last.asleep) {
-            append([event])
-        }
+        append(HiddenSleep.missingSleep(events: events, since: last.at, now: now,
+                                        asleep: asleep - last.asleep))
     }
 
     /// Called when the display side of macOS wakes (a full, user-visible wake).

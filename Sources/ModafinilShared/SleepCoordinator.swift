@@ -120,11 +120,21 @@ public final class SleepCoordinator {
     private let failureHint: () -> String?
     private let snapshot: () -> PowerSnapshot?
     private let userIdle: () -> TimeInterval?
-    private let afterBackgroundWake: () -> Void
+    private let backgroundWakeBegan: () -> Void
+    private let backgroundWakeSettled: () -> Void
+    private let keepAwakeJobs: () -> Set<Int32>
     private var lastUserIdle: TimeInterval?
-    /// Input right after a sleep request is the click or tap that asked for it.
+    /// Input right after Sleep Now on this Mac is the click that asked for it.
     private var inputGraceUntil: TimeInterval = 0
-    public static let inputGrace: TimeInterval = 5
+    public static let localInputGrace: TimeInterval = 5
+    /// When to tidy up after the current background wake (see `settleDelay`).
+    private var settleAt: TimeInterval?
+    /// A client whose connection caused the wake gets this long to establish it.
+    public static let settleDelay: TimeInterval = 10
+    /// Command-line jobs that already asked macOS to stay awake when sleep was requested.
+    /// The request overrode those; one that starts during a later background wake did
+    /// not exist then, and ends the intent instead of being slept over.
+    private var jobsAtRequest: Set<Int32>?
     /// Kernel stamps last turned into history events (0 until the first look).
     private var observed: (slept: TimeInterval, woke: TimeInterval)?
     public var hasWork: Bool { journal.intent != nil || journal.schedule != nil || journal.attempt?.phase == .pending }
@@ -168,12 +178,16 @@ public final class SleepCoordinator {
                 failureHint: @escaping () -> String? = { nil },
                 snapshot: @escaping () -> PowerSnapshot? = PowerSnapshot.read,
                 userIdle: @escaping () -> TimeInterval? = SystemUserActivity.idleSeconds,
-                afterBackgroundWake: @escaping () -> Void = {}) {
+                keepAwakeJobs: @escaping () -> Set<Int32> = { [] },
+                backgroundWakeBegan: @escaping () -> Void = {},
+                backgroundWakeSettled: @escaping () -> Void = {}) {
         self.journal = journal; self.now = now; self.continuous = continuous
         self.powerTimes = powerTimes; self.disablePrevention = disablePrevention
         self.requestSleep = requestSleep; self.save = save; self.failureHint = failureHint
         self.snapshot = snapshot; self.userIdle = userIdle
-        self.afterBackgroundWake = afterBackgroundWake
+        self.keepAwakeJobs = keepAwakeJobs
+        self.backgroundWakeBegan = backgroundWakeBegan
+        self.backgroundWakeSettled = backgroundWakeSettled
     }
 
     public func restore() throws {
@@ -240,14 +254,19 @@ public final class SleepCoordinator {
         try persist()
     }
 
-    public func begin(trigger: String = "request", maintainSleepIntent: Bool = false) throws {
+    /// - Parameter inputGrace: seconds during which keyboard or mouse input does not
+    ///   cancel the request (Sleep Now on this Mac: the input is the click itself).
+    public func begin(trigger: String = "request", maintainSleepIntent: Bool = false,
+                      inputGrace: TimeInterval = 0) throws {
         let times = try powerTimes()
         try disablePrevention()
         let time = continuous()
         if maintainSleepIntent {
             journal.intent = SleepIntent(boot: times.boot, lastSleep: times.slept, lastWake: times.woke)
             lastUserIdle = userIdle()
-            inputGraceUntil = time + Self.inputGrace
+            inputGraceUntil = time + inputGrace
+            jobsAtRequest = keepAwakeJobs()
+            settleAt = nil
         }
         journal.schedule = nil
         journal.attempt = SleepAttempt(id: UUID().uuidString, requestedAt: now(), baselineSleep: times.slept,
@@ -331,7 +350,9 @@ public final class SleepCoordinator {
                 }
             }
             if journal.attempt != attempt { journal.attempt = attempt; try persist() }
-            if attempt.phase == .failed { journal.intent = nil; try persist() }
+            // Only when there is something to clear: the helper ticks for good now, and
+            // an old failed receipt must not be rewritten every five seconds.
+            if attempt.phase == .failed, journal.intent != nil { journal.intent = nil; try persist() }
             try maintainIntent(times: times, time: time)
         } catch {
             journal.intent = nil
@@ -381,9 +402,27 @@ public final class SleepCoordinator {
             // turning on a sleep-prevention lease for incidental Ethernet traffic.
             intent.returnAfter = time + 90
             lastUserIdle = userIdle()
-            // The Mac is meant to go back to sleep: let the helper clear what would
-            // slow that down (see HelperService).
-            afterBackgroundWake()
+            settleAt = time + Self.settleDelay
+            backgroundWakeBegan()
+        }
+        if intent.returnAfter != nil {
+            // Someone started a job that asks macOS to stay awake (over SSH, say) during
+            // this wake: they want the Mac on. Sleep blockers count again at once.
+            let known = jobsAtRequest ?? keepAwakeJobs()
+            jobsAtRequest = known
+            if !keepAwakeJobs().subtracting(known).isEmpty {
+                journal.intent = nil
+                lastUserIdle = nil
+                settleAt = nil
+                recordPowerEvent(PowerEvent(kind: .note, at: now().timeIntervalSince1970,
+                    note: "Stayed awake after a background wake: a job that keeps the Mac awake started"))
+                try persist()
+                return
+            }
+            if let due = settleAt, time >= due {
+                settleAt = nil
+                backgroundWakeSettled()
+            }
         }
         if intent.returnAfter != nil, let idle = userIdle() {
             if let previous = lastUserIdle, idle + 0.5 < previous {

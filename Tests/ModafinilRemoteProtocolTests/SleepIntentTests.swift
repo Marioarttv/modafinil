@@ -14,6 +14,8 @@ final class SleepIntentTests: XCTestCase {
         var failSave = false
         var failRequest = false
         var backgroundWakes = 0
+        var settled = 0
+        var jobs: Set<Int32> = []
         var saved = SleepJournal()
         lazy var engine = make()
         func make(journal: SleepJournal = .init()) -> SleepCoordinator {
@@ -27,7 +29,8 @@ final class SleepIntentTests: XCTestCase {
                 }, snapshot: {
                     PowerSnapshot(slept: self.times.slept, woke: self.times.woke, boot: self.times.boot,
                         wakeReason: self.reason, capabilities: 0)
-                }, userIdle: { self.idle }, afterBackgroundWake: { self.backgroundWakes += 1 })
+                }, userIdle: { self.idle }, keepAwakeJobs: { self.jobs },
+                   backgroundWakeBegan: { self.backgroundWakes += 1 }, backgroundWakeSettled: { self.settled += 1 })
         }
         func advance(_ seconds: Double) { date.addTimeInterval(seconds); clock += seconds; idle += seconds; engine.tick() }
         func sleepAndWake() {
@@ -122,16 +125,12 @@ final class SleepIntentTests: XCTestCase {
         f.sleepAndWake()
         XCTAssertEqual(f.engine.journal.attempt?.phase, .confirmed)
     }
-    func testInputWhileWaitingForSleepCancelsOnceTheRequestGraceIsOver() throws {
-        // The first seconds belong to the click or tap that asked for sleep (0.14.0).
+    func testLocalInputDuringInitialRequestPreventsAnySleepRequest() throws {
         let f = Fixture(); try f.engine.begin(maintainSleepIntent: true)
         f.idle = 0; f.advance(2)
-        XCTAssertNotNil(f.engine.journal.intent)
-        XCTAssertEqual(f.requests, 1)
-        f.advance(4); f.idle = 0; f.advance(1)
         XCTAssertNil(f.engine.journal.intent)
         XCTAssertEqual(f.engine.journal.attempt?.phase, .cancelled)
-        XCTAssertEqual(f.requests, 1)
+        XCTAssertEqual(f.requests, 0)
     }
     func testPendingIntentResumesExistingBudgetAfterHelperRestart() throws {
         let f = Fixture(); try f.start()

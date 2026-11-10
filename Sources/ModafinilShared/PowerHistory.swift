@@ -422,27 +422,54 @@ public enum HiddenSleep {
     ///   - events: everything recorded so far, including the wake being handled.
     ///   - since: when the recorder last looked (the Mac was awake then).
     ///   - asleep: seconds the clocks say the Mac slept between `since` and `now`.
-    /// - Returns: a sleep event covering the unrecorded part, or nil.
-    public static func missingSleep(events: [PowerEvent], since: Double, now: Double, asleep: Double) -> PowerEvent? {
+    /// - Returns: sleep events that cover the unrecorded part: each ends at the next
+    ///   recorded event, and together they last as long as the sleep that is missing.
+    public static func missingSleep(events: [PowerEvent], since: Double, now: Double, asleep: Double) -> [PowerEvent] {
         let window = events.filter { ($0.kind == .sleep || $0.kind == .wake) && $0.at > since && $0.at <= now }
             .sorted { $0.at < $1.at }
+        // Stretches the record shows as not asleep. Unseen sleep can only be in these.
+        var gaps: [(start: Double, end: Double, afterBackgroundWake: Bool)] = []
         var recorded = 0.0
+        var cursor = since
+        var afterBackgroundWake = false
         var sleptAt: Double?
         for event in window {
             if event.kind == .sleep {
-                if sleptAt == nil { sleptAt = event.at }
-            } else if let start = sleptAt {
-                recorded += event.at - start
-                sleptAt = nil
+                if sleptAt == nil {
+                    gaps.append((cursor, event.at, afterBackgroundWake))
+                    sleptAt = event.at
+                }
+            } else {
+                if let start = sleptAt {
+                    recorded += event.at - start
+                    sleptAt = nil
+                } else {
+                    // A wake without a recorded sleep: the sleep before it went unseen.
+                    gaps.append((cursor, event.at, afterBackgroundWake))
+                }
+                cursor = event.at
+                afterBackgroundWake = event.dark != false
             }
         }
         if let start = sleptAt { recorded += now - start }
-        let missing = min(asleep - recorded, now - since - recorded)
-        guard missing > threshold else { return nil }
-        // Placed right before the first recorded sleep: with the helper sampling, the
-        // unseen part is a sleep that began just after the last look.
-        let end = window.first(where: { $0.kind == .sleep })?.at ?? now
-        return PowerEvent(kind: .sleep, at: max(since, end - missing), reason: reason)
+        let room = gaps.reduce(0) { $0 + max(0, $1.end - $1.start) }
+        var missing = min(asleep - recorded, room)
+        guard missing > threshold else { return [] }
+        // A Mac that woke in the background and was not seen again until its next
+        // recorded sleep was most likely asleep in between: those stretches first, the
+        // longest first. The stretch before the first sleep (someone may have been
+        // working) and those after a full wake come last.
+        let order = gaps.filter { $0.end > $0.start }.sorted {
+            $0.afterBackgroundWake != $1.afterBackgroundWake ? $0.afterBackgroundWake
+                : ($0.end - $0.start) > ($1.end - $1.start)
+        }
+        var result: [PowerEvent] = []
+        for gap in order where missing > 1 {
+            let part = min(gap.end - gap.start, missing)
+            result.append(PowerEvent(kind: .sleep, at: gap.end - part, reason: reason))
+            missing -= part
+        }
+        return result
     }
 }
 

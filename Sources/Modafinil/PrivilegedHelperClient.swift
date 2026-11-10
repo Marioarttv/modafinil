@@ -109,7 +109,31 @@ final class PrivilegedHelperClient {
         }
     }
 
+    /// Asks a helper left over from before an update to make room (see the helper).
+    /// `completion(true)`: it is exiting, and the next call starts the installed one.
+    /// A helper older than 0.14.0 does not know the call and counts as not retiring.
+    func retireIfReplaced(completion: @escaping (Bool) -> Void) {
+        var didComplete = false
+        let finish: (Bool) -> Void = { retired in
+            DispatchQueue.main.async {
+                guard !didComplete else { return }
+                didComplete = true
+                if retired { self.invalidate() }
+                completion(retired)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { finish(false) }
+        remoteProxy { result in
+            switch result {
+            case .failure: finish(false)
+            case .success(let proxy): proxy.retireIfReplaced { finish($0) }
+            }
+        }
+    }
+
+    /// - Parameter local: Sleep Now at this Mac (the click must not cancel it).
     func sleepAfterDisablingSleepPrevention(
+        local: Bool = false,
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
         var didComplete = false
@@ -132,13 +156,15 @@ final class PrivilegedHelperClient {
             case .failure(let error):
                 finish(.failure(error))
             case .success(let proxy):
-                proxy.requestTrackedSleep { success, message in
+                let reply: (Bool, String?) -> Void = { success, message in
                     if success {
                         finish(.success(()))
                     } else {
                         finish(.failure(HelperError(message ?? "The helper could not put the Mac to sleep.")))
                     }
                 }
+                if local { proxy.requestLocalSleep(withReply: reply) }
+                else { proxy.requestTrackedSleep(withReply: reply) }
             }
         }
     }

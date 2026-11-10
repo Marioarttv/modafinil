@@ -45,12 +45,23 @@ What 0.14.0 does:
 
 - **Hard sleep.** From a sleep request until that sleep is over, the helper switches those
   three assertion types off system-wide with powerd's root-only switch
-  (`pmset disableassertion <type>`). Nothing is killed and no service is stopped; the
+  (`pmset disableassertion <type>`). The switch kills nothing and stops no service; the
   assertions simply do not count while the Mac is meant to sleep. A wake you asked for
   (Wake & Keep Awake, the keyboard or mouse, the lid), a failed request, or quitting
-  Modafinil switches them back on. powerd counts disables and forgets them at a restart, so
-  each one is paired with one enable through
-  `/Library/Application Support/Modafinil/sleep-enforcement.json`, tied to the boot.
+  Modafinil switches them back on, and quitting or uninstalling reports it if that failed.
+  powerd counts disables and forgets them when it restarts, so the helper enables a type
+  once before each disable (the count is then exactly one, whatever a crash or a powerd
+  restart left behind), does so again for every sleep attempt, and keeps
+  `/Library/Application Support/Modafinil/sleep-enforcement.json` while types may be off,
+  so a restarted helper gives them back.
+- **A job started during a background wake ends the sleep.** The blockers that existed
+  when you asked for sleep are overridden. If a command-line job that asks macOS to stay
+  awake (`caffeinate -s`, for example over SSH) starts during a later background wake, the
+  sleep intent ends, the blockers count again and the Mac stays awake for it.
+- **Time for the phone after a wake.** With nothing holding it, macOS ends a background
+  wake after about 25 seconds. The helper holds each background wake of an intended sleep
+  open for 45 seconds so Wake & Keep Awake can arrive over Wi-Fi and Tailscale; the phone's
+  relay request repeats every 10 seconds as before.
 - **Quit Sunshine before sleep** (Settings → Before sleeping, on by default, shown when
   Sunshine is installed). A Mac that streams to Moonlight cannot stay asleep: the stream
   keeps it awake, the client's input counts as someone using the Mac, and an open Moonlight
@@ -62,26 +73,32 @@ What 0.14.0 does:
   exists from a sleep request until that sleep is over. A script that restarts Sunshine or
   wakes the display should do nothing while it exists and Modafinil is running.
 - **Sleep Now** on the Overview page and in the menu bar card puts this Mac to sleep the
-  same way as the iPhone. Keyboard or mouse input in the first 5 seconds after any sleep
-  request is taken as the request itself; after that, input still cancels a sleep that has
-  not happened yet.
+  same way as the iPhone. Keyboard or mouse input in the first 5 seconds after Sleep Now
+  is taken as the click itself; after that, and from the start for every other sleep
+  request, input cancels a sleep that has not happened yet.
 - **The T3 rule waits for jobs that ask to stay awake.** Because a sleep now really
   happens, "Sleep when T3 Code finishes" waits while a command-line job holds a
   system-sleep assertion (`caffeinate -s`, as agents use around renders); its status names
-  the job. An explicit sleep (iPhone, another Mac, a timer, Sleep Now) does not wait, and
-  Sleep History notes which job it overrode.
+  the job, and it waits for as long as the job runs, so a script that is always running
+  must not hold `-s` (the Mac mini's Sunshine watchdog now uses `caffeinate -diu`). An
+  explicit sleep (iPhone, another Mac, a timer, Sleep Now) does not wait, and Sleep History
+  notes which job it overrode.
 - **Complete Sleep History.** The helper now stays running and notes every sleep and wake
   itself (two sysctls every 5 seconds while the Mac is awake); before, the app missed most
   background wakes and showed a Mac that slept all day as awake. Sleep that nobody saw
   (wakes too short to sample, or the helper not running) is measured from macOS's two
-  clocks and entered as "Asleep (background wakes not recorded)". After an app update the
-  helper restarts itself once the old app has quit.
+  clocks and entered as "Asleep (background wakes not recorded)": first where the Mac was
+  last seen in a background wake, then before the first recorded sleep; the total is
+  exact, the placement is a best estimate. After an app update the new app asks the old
+  helper to make room, and a helper without clients exits by itself once its executable
+  has been replaced. (An update from 0.13.0 or earlier still needs the old helper's
+  15-second idle exit: quit the app, replace it, wait, then open it.)
 
-- **Shorter background wakes.** An `smbd` left running after its clients disconnected
-  never answers macOS's sleep notification, so every return to sleep waited out its
-  28-second timeout (macOS 27.2). After a background wake of an intended sleep the helper
-  ends it; launchd starts a new one for the next connection. On the Mac mini this halved
-  each background wake (about 55 s to 28 s).
+- **No 28-second wait at every return to sleep.** An `smbd` left running after its clients
+  disconnected never answers macOS's sleep notification, so every return to sleep waited
+  out its 28-second timeout (macOS 27.2). Ten seconds into a background wake of an intended
+  sleep the helper ends an `smbd` that has no connected client; launchd starts a new one
+  for the next connection. One that is serving a client is left alone.
 
 - **The wake alarm also starts a shut-down Mac** (see Remote shutdown below).
 

@@ -171,6 +171,16 @@ final class AppDelegate: NSObject,
         refreshCodexRuntimeState(shouldReconcile: false)
         updateCodexRuntimeMonitoring()
         refreshHelperStatus()
+        // After an update the helper of the previous version may still be running.
+        if helperStatus == .enabled {
+            helperClient.retireIfReplaced { [weak self] retired in
+                guard retired, let self else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                    self?.refreshSleepStatus()
+                    self?.synchronizeSleepJournal()
+                }
+            }
+        }
         refreshSleepStatus()
         synchronizeSleepJournal()
         registerJournalNotification()
@@ -227,6 +237,13 @@ final class AppDelegate: NSObject,
         if shutdownSchedule != nil { setShutdownSchedule(nil) }
         // Quitting ends a pending sleep and its intent; scripts must not wait on a flag.
         try? FileManager.default.removeItem(at: Self.sleepingFlagURL)
+        // Sunshine was quit for a sleep that is over or ends with this quit: the
+        // one-minute fallback dies with the app, so settle it now.
+        streamingResumeWork?.cancel()
+        if UserDefaults.standard.bool(forKey: Self.streamingQuitForSleepDefaultsKey) {
+            UserDefaults.standard.removeObject(forKey: Self.streamingQuitForSleepDefaultsKey)
+            if StreamingHost.runningPIDs.isEmpty { StreamingHost.open() }
+        }
         historyRecorder.recordAppStop()
         powerMonitor.stop()
         if let journalNotifyToken { notify_cancel(journalNotifyToken) }
@@ -869,7 +886,7 @@ final class AppDelegate: NSObject,
         // An explicit sleep at the Mac: keep-awake stays off afterwards.
         isKeepAwakeSuspendedForT3Sleep = false
         pendingSleepSource = ("Mac", Date())
-        requestSystemSleep(source: "Mac") { [weak self] result in
+        requestSystemSleep(source: "Mac", local: true) { [weak self] result in
             guard let self, case .failure(let error) = result else { return }
             self.pendingSleepSource = nil
             self.lastError = "Could not sleep: \(error.localizedDescription)"
@@ -1172,7 +1189,10 @@ final class AppDelegate: NSObject,
             historyRecorder.note("Sleep requested (\(source))", at: attempt.requestedAt)
             // A sleep the helper starts by itself (the sleep timer) never passes through
             // requestSystemSleep. Its first native request is two seconds away.
-            if attempt.phase == .pending { pauseStreamingForSleep(source: source) }
+            if attempt.phase == .pending, attempt.trigger == "timer" {
+                pauseStreamingForSleep(source: source)
+                noteOverriddenKeepAwakeJobs(source: source)
+            }
         }
         switch attempt.phase {
         case .pending: break
@@ -1303,7 +1323,8 @@ final class AppDelegate: NSObject,
 
     /// Turns keep-awake off and asks the helper to sleep the Mac now. Arms
     /// remote wake recovery, like a sleep timer.
-    private func requestSystemSleep(source: String, completion: @escaping (Result<Void, Error>) -> Void) {
+    private func requestSystemSleep(source: String, local: Bool = false,
+                                    completion: @escaping (Result<Void, Error>) -> Void) {
         guard shutdownProgress?.phase != .pending else {
             completion(.failure(CompanionRemoteError("The Mac is shutting down.")))
             return
@@ -1343,10 +1364,7 @@ final class AppDelegate: NSObject,
         pauseStreamingForSleep(source: source)
         // The helper retries for about 30 s, which gives the apps time to quit.
         quitSleepBlockingApps(before: source)
-        let jobs = keepAwakeJobs(effects: [.systemSleep]).map(\.title)
-        if !jobs.isEmpty {
-            historyRecorder.note("Sleeping although \(jobs.prefix(3).joined(separator: ", ")) asked to keep the Mac awake (\(source))")
-        }
+        noteOverriddenKeepAwakeJobs(source: source)
         lastError = nil
         companionConfigurationStore.isWakeArmed = true
         cancelProvisionalWakeLease()
@@ -1355,7 +1373,7 @@ final class AppDelegate: NSObject,
         sleepStatusGeneration += 1
         refreshIcon()
 
-        helperClient.sleepAfterDisablingSleepPrevention { [weak self] result in
+        helperClient.sleepAfterDisablingSleepPrevention(local: local) { [weak self] result in
             guard let self else { return }
 
             self.isToggleInFlight = false
@@ -2033,6 +2051,12 @@ final class AppDelegate: NSObject,
     private func t3SleepHoldReason() -> String? {
         let jobs = keepAwakeJobs(effects: [.systemSleep]).map(\.title)
         return jobs.isEmpty ? nil : "waiting for \(jobs.prefix(2).joined(separator: ", ")) to finish"
+    }
+
+    private func noteOverriddenKeepAwakeJobs(source: String) {
+        let jobs = keepAwakeJobs(effects: [.systemSleep]).map(\.title)
+        guard !jobs.isEmpty else { return }
+        historyRecorder.note("Sleeping although \(jobs.prefix(3).joined(separator: ", ")) asked to keep the Mac awake (\(source))")
     }
 
     // MARK: Streaming host and the sleeping flag
