@@ -106,6 +106,10 @@ struct MenuBarPopoverView: View {
             HStack {
                 Button("Open Modafinil…") { model.actions?.uiOpenMainWindow(.overview) }
                 Button("History") { model.actions?.uiOpenMainWindow(.history) }
+                Button("Sleep Now") { model.actions?.uiSleepNow() }
+                    .disabled(!snapshot.canScheduleSleep)
+                    .help("Turns keep-awake off and puts this Mac to sleep now")
+                    .accessibilityIdentifier("popoverSleepNow")
                 Spacer()
                 Button { model.actions?.uiQuit() } label: { Image(systemName: "power") }
                     .help("Quit Modafinil")

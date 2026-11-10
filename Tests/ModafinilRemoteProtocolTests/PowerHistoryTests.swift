@@ -168,7 +168,7 @@ final class PowerHistoryTests: XCTestCase {
 
     func testTimerModeWakesHelperOnlyAtDeadlineAndDuringVerification() throws {
         let f = SleepCoordinatorTests.Fixture()
-        XCTAssertEqual(f.engine.timerMode, .idle)
+        XCTAssertEqual(f.engine.timerMode, .observing)
         try f.engine.schedule(after: 600)
         XCTAssertEqual(f.engine.timerMode, .deadline(Date(timeIntervalSince1970: 1_600)))
         f.advance(600)
@@ -176,7 +176,7 @@ final class PowerHistoryTests: XCTestCase {
         XCTAssertEqual(f.engine.journal.attempt?.trigger, "timer")
         f.times.slept = 1_605; f.times.woke = 1_700
         f.advance(5)
-        XCTAssertEqual(f.engine.timerMode, .idle)
+        XCTAssertEqual(f.engine.timerMode, .observing)
     }
 
     func testSleepConfirmedBeforeCPUStopsRecordsTheFirstWakeLater() throws {
@@ -191,7 +191,7 @@ final class PowerHistoryTests: XCTestCase {
         f.times.woke = 5_000
         f.advance(1)
         XCTAssertEqual(f.engine.journal.attempt?.wokeAt, Date(timeIntervalSince1970: 5_000))
-        XCTAssertEqual(f.engine.timerMode, .idle)
+        XCTAssertEqual(f.engine.timerMode, .observing)
     }
 
     func testLaterSleepMakesFirstWakeUnknownInsteadOfWrong() throws {
@@ -203,7 +203,7 @@ final class PowerHistoryTests: XCTestCase {
         f.times.slept = 9_000; f.times.woke = 9_500 // a second sleep/wake pair happened
         f.advance(1)
         XCTAssertNil(f.engine.journal.attempt?.wokeAt)
-        XCTAssertEqual(f.engine.timerMode, .idle)
+        XCTAssertEqual(f.engine.timerMode, .observing)
     }
 
     func testTimerDeadlineIgnoresClockSetBackwards() throws {

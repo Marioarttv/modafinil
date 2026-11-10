@@ -15,7 +15,7 @@ extension RemoteMacsController.Phase {
         case .working(let message): return message
         case .failed: return "Could not complete the request"
         case .shuttingDown: return "Shutting down · apps are quitting"
-        case .off(let date): return "Shut down at \(UIFormat.time(date)) · press its power button to turn it on"
+        case .off(let date): return "Shut down at \(UIFormat.time(date)) · on again at its wake alarm or with its power button"
         }
     }
 
@@ -93,7 +93,7 @@ struct OtherMacsPage: View {
                     Text("• Wake sends Wake-on-LAN packets from this Mac when it is on the same home network, and asks the iPad relay at the same time, so it also works away from home.")
                     Text("• The other Mac turns keep-awake on once it answers. Sleep turns keep-awake off and puts it to sleep.")
                     Text("• “Sleep when T3 Code finishes” is that Mac’s own setting and counts only the T3 threads running on it. On a Mac mini it applies once nobody has used its keyboard or mouse for 5 minutes.")
-                    Text("• Shut Down turns the other Mac off completely. Nothing here or on the iPhone can turn it on again; press its power button. Needs Modafinil 0.13.0 there.")
+                    Text("• Shut Down turns the other Mac off completely. Nothing here or on the iPhone can turn it on again afterwards: set a wake alarm on it first, or press its power button. Needs Modafinil 0.13.0 there.")
                     Text("• Status is checked when this page or the menu bar card opens, never in the background.")
                 }
                 .font(.callout)
@@ -231,7 +231,7 @@ struct OtherMacsPage: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
                 .disabled(mac.phase.isBusy || mac.phase == .shuttingDown)
-                .help(mac.phase.isOff ? "If it is only asleep this wakes it; a shut-down Mac needs its power button." : "")
+                .help(mac.phase.isOff ? "If it is only asleep this wakes it; a shut-down Mac starts at its wake alarm or with its power button." : "")
 
                 Button {
                     sleepConfirmationFor = mac

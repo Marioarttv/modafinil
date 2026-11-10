@@ -1,15 +1,31 @@
 import Foundation
+import IOKit.pwr_mgt
 import ModafinilShared
 
 final class HelperService: NSObject, NSXPCListenerDelegate {
     private let listener = NSXPCListener(machServiceName: ModafinilConstants.helperMachServiceName)
     private let stateQueue = DispatchQueue(label: "com.narcotic.modafinil.helper.state")
-    private let idleExitDelay: TimeInterval = 15
     private var connectedSessionIDs = Set<UUID>()
     private var activeLeaseIDs = Set<UUID>()
-    private var idleExitWorkItem: DispatchWorkItem?
     private var sleepTickTimer: DispatchSourceTimer?
-    private var sleepTimerMode: SleepCoordinator.TimerMode = .idle
+    private var sleepTimerMode: SleepCoordinator.TimerMode = .observing
+    private var sleepEnforcement = SleepEnforcement(setType: { type, disabled in
+        // pmset reports a refusal on standard output and still exits 0.
+        let output = try Shell.run("/usr/bin/pmset", [disabled ? "disableassertion" : "enableassertion", type])
+        if !output.isEmpty { throw SleepError(output) }
+    })
+    private var lastEnforcementProblem: String?
+    private var lastEnforcementTry: TimeInterval = 0
+    private var enforcedAttemptID: String?
+    /// Notes sleeps and wakes for Sleep History; runs for as long as the helper does.
+    private var observeTimer: DispatchSourceTimer?
+    private var wakeHoldAssertion: IOPMAssertionID = 0
+    /// Set once this helper has agreed to make room for a newly installed one: every
+    /// later request is refused, so nothing it grants can die with it.
+    private var isRetiring = false
+    private static let retiringMessage = "The helper is restarting after an update. Try again in a moment."
+    /// The helper binary this process was started from (device, inode, change time).
+    private let startedFrom = HelperService.executableIdentity()
     private var sleepJournalLoadError: String?
     private lazy var sleepCoordinator: SleepCoordinator = {
         let journal: SleepJournal
@@ -22,7 +38,19 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
             try self.setSystemSleepPreventionEnabled(false)
             self.activeLeaseIDs.removeAll()
             self.removeOwnershipMarker()
-        }, failureHint: { SleepBlockers.failureHint() })
+        }, failureHint: { SleepBlockers.failureHint() }, keepAwakeJobs: {
+            // Command-line jobs (`caffeinate -s`, a render tool) that a person or an agent
+            // started: over SSH or from a terminal. Apps, macOS services and third-party
+            // daemons that take an assertion on their own are not someone asking for the
+            // Mac to stay awake.
+            var jobs: [Int32: Set<Int32>] = [:]
+            for job in KeepAwakeJobs.find(assertions: SleepBlockers.readAssertions(), effects: [.systemSleep],
+                                          isRegularApp: { _ in false }) {
+                if let script = HelperService.scriptFamily(of: job.pid) { jobs[job.pid] = script }
+            }
+            return jobs
+        }, backgroundWakeBegan: { [unowned self] in self.holdBackgroundWake() },
+           backgroundWakeSettled: { [unowned self] in self.endFileSharingDaemon() })
     }()
     private let wakeScheduler = WakeScheduler()
     private lazy var powerMonitor = SystemPowerMonitor(callbackQueue: stateQueue)
@@ -34,6 +62,16 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         super.init()
         listener.delegate = self
         performStartupCleanup()
+        // A wake too short for the 40-second step, or a client that reconnected after it:
+        // File Sharing also lets go at the moment an intended sleep begins again.
+        // Not during the request's own first sleep: a client that unmounts on the sleep
+        // notice gets to finish. The helper's later returns to sleep are included.
+        powerMonitor.onWillSleep = { [weak self] in
+            guard let self, self.sleepCoordinator.journal.intent != nil else { return }
+            let attempt = self.sleepCoordinator.journal.attempt
+            guard attempt?.phase != .pending || attempt?.trigger == "sleep intent" else { return }
+            self.endFileSharingDaemon()
+        }
         powerMonitor.onDidWake = { [weak self] in
             guard let self else { return }
             self.sleepCoordinator.tick()
@@ -46,6 +84,7 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
             self.stateQueue.async {
                 self.sleepTickTimer?.cancel()
                 self.sleepTickTimer = nil
+                self.sleepTimerMode = .observing
                 self.updateSleepTickTimer()
             }
         }
@@ -85,6 +124,7 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         withReply reply: @escaping (Bool, String?) -> Void
     ) {
         stateQueue.async {
+            guard !self.isRetiring else { reply(false, Self.retiringMessage); return }
             do {
                 try self.sleepCoordinator.cancelPending()
                 self.updateSleepTickTimer()
@@ -123,12 +163,16 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         }
     }
 
+    /// - Parameter local: Sleep Now at this Mac: input in the next seconds is the click.
     fileprivate func sleepAfterDisablingSleepPrevention(
+        local: Bool = false,
         withReply reply: @escaping (Bool, String?) -> Void
     ) {
         stateQueue.async {
+            guard !self.isRetiring else { reply(false, Self.retiringMessage); return }
             do {
-                try self.sleepCoordinator.begin(trigger: "request", maintainSleepIntent: true)
+                try self.sleepCoordinator.begin(trigger: "request", maintainSleepIntent: true,
+                    inputGrace: local ? SleepCoordinator.localInputGrace : 0)
                 self.updateSleepTickTimer()
                 reply(true, nil)
             } catch { reply(false, error.localizedDescription) }
@@ -145,6 +189,7 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
 
     fileprivate func shutDownNow(withReply reply: @escaping (Bool, String?) -> Void) {
         stateQueue.async {
+            guard !self.isRetiring else { reply(false, Self.retiringMessage); return }
             // A sleep request racing the shutdown would leave a sleeping, not an off, Mac.
             try? self.sleepCoordinator.cancelSchedule()
             try? self.sleepCoordinator.cancelPending()
@@ -180,6 +225,7 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
 
     fileprivate func setSleepTimer(after seconds: Double, withReply reply: @escaping (Bool, String?) -> Void) {
         stateQueue.async {
+            guard !self.isRetiring else { reply(false, Self.retiringMessage); return }
             do {
                 if seconds == -1 {
                     try self.sleepCoordinator.cancelSchedule()
@@ -192,28 +238,133 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         }
     }
 
-    /// Wakes the helper only when needed: once at the timer date (wall clock, so it
-    /// also fires right after a wake if the date passed during sleep), and once per
-    /// second only during sleep verification or a background-wake grace period.
+    /// Holds powerd's assertion switch exactly while the coordinator wants it. Called
+    /// after every state change and tick, so it is engaged before the first native
+    /// sleep request (two seconds after a request) and released with the sleep intent.
+    private func reconcileSleepEnforcement(force: Bool = false) {
+        let wanted = sleepCoordinator.wantsSleepEnforcement
+        if wanted, let attempt = sleepCoordinator.journal.attempt, attempt.phase == .pending,
+           attempt.id != enforcedAttemptID {
+            // Every sleep attempt disables the types afresh: powerd may have restarted.
+            enforcedAttemptID = attempt.id
+            sleepEnforcement.reassert()
+            releaseWakeHold() // a new sleep must not wait for the last wake's hold
+        }
+        if !wanted { releaseWakeHold() }
+        let settled = wanted ? (sleepEnforcement.isEngaged && sleepEnforcement.isFullyApplied)
+                             : !sleepEnforcement.isEngaged
+        guard !settled else { lastEnforcementProblem = nil; return }
+        // A step that keeps failing is retried every five seconds, not every tick.
+        let time = SystemSleepTimes.continuousTime
+        guard force || lastEnforcementProblem == nil || time - lastEnforcementTry >= 5 else { return }
+        lastEnforcementTry = time
+        let problem = sleepEnforcement.set(engaged: wanted)
+        if let problem, problem != lastEnforcementProblem {
+            NSLog("ModafinilHelper sleep enforcement: %@", problem)
+        }
+        lastEnforcementProblem = problem
+    }
+
+    /// Asked before the helper is unregistered (uninstall): without a running helper
+    /// nothing would switch the sleep blockers back on. Quitting does not ask; the helper
+    /// keeps running then and retries by itself.
+    fileprivate func confirmSleepBlockersRestored(withReply reply: @escaping (Bool, String?) -> Void) {
+        stateQueue.async {
+            guard !self.sleepCoordinator.wantsSleepEnforcement else {
+                reply(false, "A sleep request is still active.")
+                return
+            }
+            self.reconcileSleepEnforcement(force: true)
+            if self.sleepEnforcement.isEngaged {
+                reply(false, self.lastEnforcementProblem ?? "Sleep blockers could not be switched back on.")
+            } else { reply(true, nil) }
+        }
+    }
+
+    private func releaseWakeHold() {
+        guard wakeHoldAssertion != 0 else { return }
+        IOPMAssertionRelease(wakeHoldAssertion)
+        wakeHoldAssertion = 0
+    }
+
+    static func scriptFamily(of pid: Int32) -> Set<Int32>? {
+        KeepAwakeJobs.scriptFamily(of: pid, parent: SleepBlockerApps.parentPID, name: SleepBlockers.processName,
+                                   path: KeepAwakeJobs.executablePath, hasTerminal: hasControllingTerminal)
+    }
+
+    static func hasControllingTerminal(_ pid: Int32) -> Bool {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        return sysctl(&mib, 4, &info, &size, nil, 0) == 0 && size > 0 && info.kp_eproc.e_tdev != -1
+    }
+
+    /// After a background wake of an intended sleep, macOS goes back to sleep by itself
+    /// about 25 seconds later now that nothing holds it. A phone that asked for the wake
+    /// needs time to reach this Mac (Wi-Fi, Tailscale) and authenticate, so the wake is
+    /// held open for 45 seconds, about what the blockers used to give it by accident.
+    /// On mains power only: macOS ignores this assertion type on battery, where
+    /// Wake-on-LAN is normally off anyway. Released early by a new sleep attempt or the
+    /// end of the intent.
+    private func holdBackgroundWake() {
+        releaseWakeHold()
+        let properties: [String: Any] = [
+            kIOPMAssertionTypeKey: "InternalPreventSleep", // powerd's own dark-wake linger type
+            kIOPMAssertionNameKey: "Modafinil: time for Wake & Keep Awake to arrive",
+            kIOPMAssertionLevelKey: kIOPMAssertionLevelOn,
+            kIOPMAssertionTimeoutKey: 45,
+            kIOPMAssertionTimeoutActionKey: kIOPMAssertionTimeoutActionRelease,
+        ]
+        var id = IOPMAssertionID(0)
+        let result = IOPMAssertionCreateWithProperties(properties as CFDictionary, &id)
+        if result == kIOReturnSuccess { wakeHoldAssertion = id }
+        else { NSLog("ModafinilHelper could not hold the background wake open: 0x%x", result) }
+    }
+
+    /// Runs when a background wake of an intended sleep is about to end with the Mac
+    /// going back to sleep (no Wake & Keep Awake arrived in 40 seconds). File Sharing's
+    /// smbd is ended; launchd starts a new one for the next connection. Two reasons, both
+    /// seen on the Mac mini (macOS 27.2):
+    /// - a running smbd never answers the sleep notification, so every return to sleep
+    ///   waits out its 28-second timeout;
+    /// - a client that is still connected (the other Mac's unmount came five minutes
+    ///   late) woke the Mac again ten seconds after every sleep. Its session cannot
+    ///   outlive the sleep anyway, so ending it loses nothing the sleep would not.
+    private func endFileSharingDaemon() {
+        _ = try? Shell.run("/usr/bin/killall", ["-TERM", "smbd"])
+    }
+
+    /// Sleeps and wakes are noted every five seconds for as long as the helper runs
+    /// (a dispatch timer never wakes the Mac). On top of that the mode timer ticks once
+    /// per second during sleep verification or a background-wake grace period, and once
+    /// at the sleep timer's date (wall clock, so it also fires right after a wake if the
+    /// date passed during sleep).
     private func updateSleepTickTimer() {
+        reconcileSleepEnforcement()
+        if observeTimer == nil {
+            let timer = DispatchSource.makeTimerSource(queue: stateQueue)
+            timer.schedule(deadline: .now() + 5, repeating: 5, leeway: .seconds(1))
+            timer.setEventHandler { [weak self] in
+                guard let self else { return }
+                self.sleepCoordinator.tick()
+                self.updateSleepTickTimer()
+                self.exitIfReplaced()
+            }
+            observeTimer = timer
+            timer.resume()
+        }
         let mode = sleepCoordinator.timerMode
-        if mode == sleepTimerMode, sleepTickTimer != nil { return }
+        if mode == sleepTimerMode { return }
         sleepTickTimer?.cancel()
         sleepTickTimer = nil
         sleepTimerMode = mode
         let timer: DispatchSourceTimer
         switch mode {
-        case .idle:
-            scheduleIdleExitIfNeeded()
-            return
+        case .monitoring, .observing:
+            return // the observe timer is enough
         case .verifying:
             timer = DispatchSource.makeTimerSource(queue: stateQueue)
             timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(100))
-        case .monitoring:
-            // Dispatch timers do not schedule a hardware wake. This runs only
-            // while the CPU is awake; some dark wakes omit IOKit notifications.
-            timer = DispatchSource.makeTimerSource(queue: stateQueue)
-            timer.schedule(deadline: .now() + 5, repeating: 5, leeway: .seconds(1))
         case .deadline(let scheduledDate):
             timer = DispatchSource.makeTimerSource(queue: stateQueue)
             let date = sleepCoordinator.timerDeadline(now: Date(), continuousNow: SystemSleepTimes.continuousTime)
@@ -225,7 +376,6 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
             // The repeat only matters if the wall clock moved backwards.
             timer.schedule(wallDeadline: wall, repeating: 30, leeway: .milliseconds(500))
         }
-        cancelIdleExit()
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             self.sleepCoordinator.tick()
@@ -237,6 +387,7 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
 
     fileprivate func setScheduledWake(_ timestamp: Double, withReply reply: @escaping (Bool, String?) -> Void) {
         stateQueue.async {
+            guard !self.isRetiring else { reply(false, Self.retiringMessage); return }
             do {
                 if timestamp == 0 {
                     try self.wakeScheduler.cancel()
@@ -253,7 +404,6 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
     private func clientConnectionStarted(sessionID: UUID) {
         stateQueue.async {
             self.connectedSessionIDs.insert(sessionID)
-            self.cancelIdleExit()
         }
     }
 
@@ -271,14 +421,15 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
                     NSLog("ModafinilHelper could not restore sleep after client disconnect: \(error.localizedDescription)")
                 }
             }
-
-            self.scheduleIdleExitIfNeeded()
+            self.exitIfReplaced()
         }
     }
 
     private func performStartupCleanup() {
         stateQueue.async {
             self.restoreStaleSleepPreventionIfNeeded()
+            // Before the first tick, which may send an overdue sleep request.
+            self.reconcileSleepEnforcement()
             do {
                 let coordinator = self.sleepCoordinator
                 if let error = self.sleepJournalLoadError { coordinator.stopAfterFailure(error) }
@@ -287,7 +438,6 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
                 self.sleepCoordinator.stopAfterFailure("Sleep monitoring could not restart: \(error.localizedDescription)")
             }
             self.updateSleepTickTimer()
-            self.scheduleIdleExitIfNeeded()
         }
     }
 
@@ -306,27 +456,49 @@ final class HelperService: NSObject, NSXPCListenerDelegate {
         }
     }
 
-    private func scheduleIdleExitIfNeeded() {
-        guard connectedSessionIDs.isEmpty, activeLeaseIDs.isEmpty, !sleepCoordinator.hasWork else { return }
+    private static func executableIdentity() -> String? {
+        guard let path = Bundle.main.executablePath else { return nil }
+        var info = stat()
+        guard stat(path, &info) == 0 else { return nil }
+        // Not the change time: an extended-attribute write would look like a new binary.
+        return "\(info.st_dev):\(info.st_ino):\(info.st_size):\(info.st_mtimespec.tv_sec).\(info.st_mtimespec.tv_nsec)"
+    }
 
-        cancelIdleExit()
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.exitIfStillIdle()
+    private var isReplaced: Bool { Self.executableIdentity() != startedFrom }
+
+    /// Read on XPC threads; set once, on the state queue, just before the exit.
+    fileprivate var refusesRequests: Bool { stateQueue.sync { isRetiring } }
+
+    fileprivate static func unavailableMessage(_ service: HelperService?) -> String {
+        service == nil ? "The helper service is unavailable." : retiringMessage
+    }
+
+    /// A newly started app asks this first. A helper whose executable was replaced by
+    /// an update answers true and exits, so launchd starts the installed one for the
+    /// app's next request; sleep blockers are given back before it goes.
+    fileprivate func retireIfReplaced(withReply reply: @escaping (Bool) -> Void) {
+        stateQueue.async {
+            guard self.isReplaced, self.activeLeaseIDs.isEmpty, !self.sleepCoordinator.hasWork,
+                  self.sleepEnforcement.set(engaged: false) == nil else {
+                reply(false)
+                return
+            }
+            // From here on every request is refused (see `refuseWhileRetiring`).
+            self.isRetiring = true
+            NSLog("ModafinilHelper exiting for a newly installed app: its executable was replaced")
+            reply(true)
+            self.stateQueue.asyncAfter(deadline: .now() + 0.2) { exit(EXIT_SUCCESS) }
         }
-        idleExitWorkItem = workItem
-        stateQueue.asyncAfter(deadline: .now() + idleExitDelay, execute: workItem)
     }
 
-    private func cancelIdleExit() {
-        idleExitWorkItem?.cancel()
-        idleExitWorkItem = nil
-    }
-
-    private func exitIfStillIdle() {
-        idleExitWorkItem = nil
-
-        guard connectedSessionIDs.isEmpty, activeLeaseIDs.isEmpty, !sleepCoordinator.hasWork else { return }
-        NSLog("ModafinilHelper exiting after idle timeout")
+    /// The helper stays running to note sleeps and wakes, so after an app update it
+    /// makes room for the new binary itself: once the app is gone and nothing is
+    /// pending, a replaced (or removed) executable ends this process. launchd starts
+    /// the installed helper for the next request.
+    private func exitIfReplaced() {
+        guard connectedSessionIDs.isEmpty, activeLeaseIDs.isEmpty, !sleepCoordinator.hasWork,
+              !sleepEnforcement.isEngaged, isReplaced else { return }
+        NSLog("ModafinilHelper exiting: its executable was replaced")
         exit(EXIT_SUCCESS)
     }
 
@@ -375,24 +547,39 @@ private final class HelperSession: NSObject, ModafinilHelperProtocol {
         sleepAfterDisablingSleepPrevention(withReply: reply)
     }
 
+    func confirmSleepBlockersRestored(withReply reply: @escaping (Bool, String?) -> Void) {
+        guard let service, !service.refusesRequests else { reply(false, HelperService.unavailableMessage(service)); return }
+        service.confirmSleepBlockersRestored(withReply: reply)
+    }
+
+    func requestLocalSleep(withReply reply: @escaping (Bool, String?) -> Void) {
+        guard let service, !service.refusesRequests else { reply(false, HelperService.unavailableMessage(service)); return }
+        service.sleepAfterDisablingSleepPrevention(local: true, withReply: reply)
+    }
+
+    func retireIfReplaced(withReply reply: @escaping (Bool) -> Void) {
+        guard let service else { reply(false); return }
+        service.retireIfReplaced(withReply: reply)
+    }
+
     func canShutDown(withReply reply: @escaping (Bool, String?) -> Void) {
-        guard let service else { reply(false, "The helper service is unavailable."); return }
+        guard let service, !service.refusesRequests else { reply(false, HelperService.unavailableMessage(service)); return }
         service.canShutDown(withReply: reply)
     }
 
     func shutDownNow(withReply reply: @escaping (Bool, String?) -> Void) {
-        guard let service else { reply(false, "The helper service is unavailable."); return }
+        guard let service, !service.refusesRequests else { reply(false, HelperService.unavailableMessage(service)); return }
         service.shutDownNow(withReply: reply)
     }
 
     func setSleepTimer(after seconds: Double, withReply reply: @escaping (Bool, String?) -> Void) {
-        guard let service else { reply(false, "The helper service is unavailable."); return }
+        guard let service, !service.refusesRequests else { reply(false, HelperService.unavailableMessage(service)); return }
         service.setSleepTimer(after: seconds, withReply: reply)
     }
 
     func setScheduledWake(_ timestamp: Double, withReply reply: @escaping (Bool, String?) -> Void) {
-        guard let service else {
-            reply(false, "The helper service is unavailable.")
+        guard let service, !service.refusesRequests else {
+            reply(false, HelperService.unavailableMessage(service))
             return
         }
         service.setScheduledWake(timestamp, withReply: reply)
@@ -402,8 +589,8 @@ private final class HelperSession: NSObject, ModafinilHelperProtocol {
         _ enabled: Bool,
         withReply reply: @escaping (Bool, String?) -> Void
     ) {
-        guard let service else {
-            reply(false, "The helper service is unavailable.")
+        guard let service, !service.refusesRequests else {
+            reply(false, HelperService.unavailableMessage(service))
             return
         }
 
@@ -413,8 +600,8 @@ private final class HelperSession: NSObject, ModafinilHelperProtocol {
     func getSleepPreventionStatus(
         withReply reply: @escaping (Bool, Bool, String?) -> Void
     ) {
-        guard let service else {
-            reply(false, false, "The helper service is unavailable.")
+        guard let service, !service.refusesRequests else {
+            reply(false, false, HelperService.unavailableMessage(service))
             return
         }
 
@@ -424,8 +611,8 @@ private final class HelperSession: NSObject, ModafinilHelperProtocol {
     func sleepAfterDisablingSleepPrevention(
         withReply reply: @escaping (Bool, String?) -> Void
     ) {
-        guard let service else {
-            reply(false, "The helper service is unavailable.")
+        guard let service, !service.refusesRequests else {
+            reply(false, HelperService.unavailableMessage(service))
             return
         }
 

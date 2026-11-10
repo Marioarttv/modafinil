@@ -73,7 +73,7 @@ struct OverviewPage: View {
         let snapshot = model.snapshot
         Page {
             if let error = snapshot.lastError { ErrorBanner(message: error) }
-            HeroCard(snapshot: snapshot) { model.actions?.uiToggleKeepAwake() }
+            HeroCard(snapshot: snapshot, toggle: { model.actions?.uiToggleKeepAwake() }, sleepNow: { model.actions?.uiSleepNow() })
 
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12, alignment: .top)], spacing: 12) {
                 StatTile(title: "Sleep timer",
@@ -187,6 +187,7 @@ struct T3SleepCard: View {
 private struct HeroCard: View {
     let snapshot: AppSnapshot
     let toggle: () -> Void
+    let sleepNow: () -> Void
 
     var body: some View {
         HStack(alignment: .center, spacing: 18) {
@@ -202,6 +203,11 @@ private struct HeroCard: View {
                 }
             }
             Spacer(minLength: 12)
+            Button("Sleep Now", action: sleepNow)
+                .controlSize(.large)
+                .disabled(!snapshot.canScheduleSleep)
+                .help("Turns keep-awake off and puts this Mac to sleep now. Wake it from the iPhone or another Mac.")
+                .accessibilityIdentifier("sleepNowButton")
             Button(action: toggle) {
                 Text(snapshot.isKeepAwakeRequested ? "Turn Off" : "Turn On")
                     .frame(minWidth: 90)
@@ -560,6 +566,15 @@ struct SettingsPage: View {
                     Text("When Modafinil puts the Mac to sleep (sleep timer, iPhone, or T3 Code finishing), it asks these apps to quit, like ⌘Q, so they can still ask to save. For a sleep timer this happens 1 minute before.")
                 }
                 .accessibilityIdentifier("quitBlockersToggle")
+                if snapshot.isStreamingHostInstalled {
+                    Toggle(isOn: Binding(
+                        get: { snapshot.isQuitStreamingEnabled },
+                        set: { _ in model.actions?.uiToggleQuitStreaming() })) {
+                        Text("Quit Sunshine (Moonlight streaming)")
+                        Text("A Mac that is streaming, or that an open Moonlight window keeps checking, wakes up again at once. Modafinil quits Sunshine before every sleep it starts, also while you are connected, and Sunshine starts again when the Mac is woken.")
+                    }
+                    .accessibilityIdentifier("quitStreamingToggle")
+                }
                 LabeledContent("Would quit now",
                                value: snapshot.quitCandidates.isEmpty ? "None" : snapshot.quitCandidates.joined(separator: ", "))
                 LabeledContent("Never quit", value: SleepBlockerApps.protectedSummary)

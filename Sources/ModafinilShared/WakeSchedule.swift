@@ -14,7 +14,13 @@ public struct ScheduledPowerEvent: Equatable {
 }
 
 /// Owns only Modafinil's one-shot wake event. Other apps' alarms are untouched.
+/// The event is "wake or power on" (0.14.0): it wakes a sleeping Mac and also starts
+/// one that was shut down, which is the only way back from a remote shutdown without
+/// the power button (a Mac mini shut down at 22:47 started at 22:57, 2026-11-10).
 public final class WakeScheduler {
+    public static let eventType = kIOPMAutoWakeOrPowerOn
+    /// Alarms saved by 0.13.0 and earlier only wake; they are still found and replaced.
+    static let ownedTypes: Set<String> = [kIOPMAutoWake, kIOPMAutoWakeOrPowerOn]
     public static let owner = "com.narcotic.modafinil.scheduled-wake"
     public static let maximumDelay: TimeInterval = 30 * 24 * 60 * 60
     private let events: () -> [ScheduledPowerEvent]
@@ -44,7 +50,7 @@ public final class WakeScheduler {
 
     public func schedule(_ date: Date, now: Date = Date()) throws {
         try Self.validate(date, now: now)
-        let replacement = ScheduledPowerEvent(date: date, owner: Self.owner, type: kIOPMAutoWake)
+        let replacement = ScheduledPowerEvent(date: date, owner: Self.owner, type: Self.eventType)
         // macOS may retain already-fired events whose cancellation returns
         // kIOReturnNotFound. They must not roll back a valid new alarm.
         let previous = ownedEvents.filter { $0.date > now }
@@ -77,7 +83,7 @@ public final class WakeScheduler {
     }
 
     private var ownedEvents: [ScheduledPowerEvent] {
-        events().filter { $0.owner == Self.owner && $0.type == kIOPMAutoWake }
+        events().filter { $0.owner == Self.owner && Self.ownedTypes.contains($0.type) }
     }
 
     public static func systemEvents() -> [ScheduledPowerEvent] {

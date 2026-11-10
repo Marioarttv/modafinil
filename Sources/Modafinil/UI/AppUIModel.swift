@@ -52,6 +52,9 @@ struct AppSnapshot {
     var t3SleepAt: Date?
     var isT3RestorePending = false
     var isQuitBlockersEnabled = false
+    /// Sunshine (the Moonlight streaming host) is installed on this Mac.
+    var isStreamingHostInstalled = false
+    var isQuitStreamingEnabled = true
     /// Apps that would be asked to quit right now.
     var quitCandidates: [String] = []
     var quitExclusions: [AppChoice] = []
@@ -104,6 +107,8 @@ protocol AppUIActions: AnyObject {
     func uiToggleLoginItem()
     func uiScheduleSleep(after seconds: Int)
     func uiCancelSleepTimer()
+    func uiSleepNow()
+    func uiToggleQuitStreaming()
     func uiScheduleShutdown(after seconds: Int)
     func uiSetT3PowerAction(_ action: RemotePowerAction)
     func uiScheduleWake(at date: Date)
@@ -158,7 +163,7 @@ enum T3SleepWording {
 
 enum UIFormat {
     /// Shown before every shutdown: what it means for a Mac controlled from far away.
-    static let shutdownWarning = "The Mac turns off completely. Wake-on-LAN, the iPad relay and wake alarms cannot start it again; someone has to press its power button. Apps are asked to quit; unsaved work may be lost. If “Sleep when T3 Code finishes” is set to shut down, it is turned off."
+    static let shutdownWarning = "The Mac turns off completely. Wake-on-LAN and the iPad relay cannot start it again: only a wake alarm set before the shutdown, or its power button. Apps are asked to quit; unsaved work may be lost. If “Sleep when T3 Code finishes” is set to shut down, it is turned off."
 
     static func duration(_ seconds: Double) -> String {
         let total = Int(seconds.rounded())

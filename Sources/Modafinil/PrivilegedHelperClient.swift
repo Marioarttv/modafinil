@@ -109,7 +109,58 @@ final class PrivilegedHelperClient {
         }
     }
 
+    /// Asks a helper left over from before an update to make room (see the helper).
+    /// `completion(true)`: it is exiting, and the next call starts the installed one.
+    /// A helper older than 0.14.0 does not know the call and counts as not retiring.
+    func retireIfReplaced(completion: @escaping (Bool) -> Void) {
+        var didComplete = false
+        let finish: (Bool) -> Void = { retired in
+            DispatchQueue.main.async {
+                // Also for an answer that comes after the timeout: the connection leads
+                // to a helper that is exiting.
+                if retired { self.invalidate() }
+                guard !didComplete else { return }
+                didComplete = true
+                completion(retired)
+            }
+        }
+        // A helper that has just started (login) runs its own clean-up first.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { finish(false) }
+        remoteProxy { result in
+            switch result {
+            case .failure: finish(false)
+            case .success(let proxy): proxy.retireIfReplaced { finish($0) }
+            }
+        }
+    }
+
+    /// Before uninstalling: the sleep blockers a sleep switched off count again.
+    func confirmSleepBlockersRestored(completion: @escaping (Result<Void, Error>) -> Void) {
+        var didComplete = false
+        let finish: (Result<Void, Error>) -> Void = { result in
+            DispatchQueue.main.async {
+                guard !didComplete else { return }
+                didComplete = true
+                completion(result)
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + requestTimeout) {
+            finish(.failure(HelperError("The helper did not confirm that sleep blockers are back in effect.")))
+        }
+        remoteProxy { result in
+            switch result {
+            case .failure(let error): finish(.failure(error))
+            case .success(let proxy):
+                proxy.confirmSleepBlockersRestored { success, message in
+                    finish(success ? .success(()) : .failure(HelperError(message ?? "Sleep blockers could not be switched back on.")))
+                }
+            }
+        }
+    }
+
+    /// - Parameter local: Sleep Now at this Mac (the click must not cancel it).
     func sleepAfterDisablingSleepPrevention(
+        local: Bool = false,
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
         var didComplete = false
@@ -132,13 +183,15 @@ final class PrivilegedHelperClient {
             case .failure(let error):
                 finish(.failure(error))
             case .success(let proxy):
-                proxy.requestTrackedSleep { success, message in
+                let reply: (Bool, String?) -> Void = { success, message in
                     if success {
                         finish(.success(()))
                     } else {
                         finish(.failure(HelperError(message ?? "The helper could not put the Mac to sleep.")))
                     }
                 }
+                if local { proxy.requestLocalSleep(withReply: reply) }
+                else { proxy.requestTrackedSleep(withReply: reply) }
             }
         }
     }

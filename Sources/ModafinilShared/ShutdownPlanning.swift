@@ -99,6 +99,7 @@ public enum KeepAwakeJobs {
     ///   - executablePath: the process's executable, or nil when unknown.
     public static func find(
         assertions: [SleepBlockers.Assertion],
+        effects: Set<SleepBlocker.Effect> = [.systemSleep, .idleSleep],
         ownPID: Int32 = getpid(),
         isRegularApp: (Int32) -> Bool,
         executablePath: (Int32) -> String? = KeepAwakeJobs.executablePath,
@@ -109,7 +110,7 @@ public enum KeepAwakeJobs {
         for assertion in assertions where assertion.pid != ownPID && jobs[assertion.pid] == nil {
             let effect = SleepBlockers.effect(type: assertion.type, name: assertion.name,
                                               processName: assertion.processName)
-            guard effect == .systemSleep || effect == .idleSleep else { continue }
+            guard effects.contains(effect) else { continue }
             let isCaffeinate = assertion.processName == "caffeinate"
             if !isCaffeinate {
                 guard !isRegularApp(assertion.pid), let path = executablePath(assertion.pid),
@@ -124,6 +125,28 @@ public enum KeepAwakeJobs {
             jobs[assertion.pid] = Job(pid: assertion.pid, name: assertion.processName, forProcess: owner)
         }
         return jobs.values.sorted { $0.pid < $1.pid }
+    }
+
+    public static let sessionHosts: Set<String> = ["sshd", "sshd-session", "tmux", "screen", "login"]
+
+    /// For a job a person or an agent started: its parent processes up to, but without,
+    /// the host of its session (sshd, tmux, screen, login, or an app such as Terminal or
+    /// T3 Code). Those parents are "the script" the job belongs to: its next step shares
+    /// them, a job in another tmux window or SSH login does not. Nil for a job nobody
+    /// started: its parents lead to launchd without a session host and it has no
+    /// terminal (a launchd job, a daemon). A job detached with nohup has lost its
+    /// session host and is not recognised either.
+    public static func scriptFamily(of pid: Int32, parent: (Int32) -> Int32?, name: (Int32) -> String,
+                                    path: (Int32) -> String?, hasTerminal: (Int32) -> Bool) -> Set<Int32>? {
+        var family: Set<Int32> = []
+        var current = pid
+        for _ in 0..<24 {
+            guard let next = parent(current), next > 1, next != current else { break }
+            if sessionHosts.contains(name(next)) || path(next)?.contains(".app/") == true { return family }
+            family.insert(next)
+            current = next
+        }
+        return hasTerminal(pid) ? family : nil
     }
 
     public static func executablePath(_ pid: Int32) -> String? {

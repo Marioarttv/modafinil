@@ -13,6 +13,8 @@ public final class SystemPowerMonitor {
     private let callbackQueue: DispatchQueue
     public init(callbackQueue: DispatchQueue = .main) { self.callbackQueue = callbackQueue }
     public var onDidWake: (() -> Void)?
+    /// macOS has decided to sleep. The change is allowed at once; this runs afterwards.
+    public var onWillSleep: (() -> Void)?
 
     private static let canSystemSleep = iokitCommonMessage(0x270)
     private static let systemWillSleep = iokitCommonMessage(0x280)
@@ -59,8 +61,16 @@ public final class SystemPowerMonitor {
 
     private func handle(messageType: natural_t, argument: UnsafeMutableRawPointer?) {
         switch messageType {
-        case Self.canSystemSleep, Self.systemWillSleep:
+        case Self.canSystemSleep:
             IOAllowPowerChange(rootPort, Int(bitPattern: argument))
+        case Self.systemWillSleep:
+            IOAllowPowerChange(rootPort, Int(bitPattern: argument))
+            // If the Mac is asleep before this runs, it would run at the next wake: skip it.
+            let noticed = SystemSleepTimes.continuousTime
+            callbackQueue.async { [weak self] in
+                guard SystemSleepTimes.continuousTime - noticed < 5 else { return }
+                self?.onWillSleep?()
+            }
         case Self.systemHasPoweredOn:
             callbackQueue.async { [weak self] in self?.onDidWake?() }
         default:
