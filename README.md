@@ -202,7 +202,11 @@ Paired observing Macs receive signed power-intent pushes on tailnet UDP 48767.
 Only authenticated command peers are notified (up to 16); receivers require the
 paired sender's tailnet address and command key, a fresh timestamp and increasing
 revision. Three datagrams tolerate loss; delayed older notices cannot undo a newer
-one. These notices authorize no power command. Observers cache only policy metadata
+one. The current state is re-sent every minute and after network changes, re-signed
+with the same revision, so an observer that was asleep or offline at the change, or
+missed the launch notice because Tailscale was not up yet after a boot, catches up
+(0.14.1; before, a missed wake notice after a shutdown left the MacBook believing the
+mini slept for 40 hours). These notices authorize no power command. Observers cache only policy metadata
 under `~/Library/Application Support/Modafinil/remote-power/<tailnet-IP>.json`.
 Automatic remote refreshes skip sleeping Macs, including after app restart.
 

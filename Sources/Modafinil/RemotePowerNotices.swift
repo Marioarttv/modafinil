@@ -4,6 +4,10 @@ import Network
 
 /// Pushes only to peers that have already authenticated to our TCP listener.
 /// Received notices must match a paired Mac's address AND command secret.
+/// The current state is re-sent every minute and on network changes, with the same
+/// revision and a fresh timestamp: an observer that was asleep or offline when the
+/// change happened (or our tunnel was not up yet, right after a boot) catches up,
+/// and one that already has it ignores the repeat.
 final class RemotePowerNotices {
     private let queue = DispatchQueue(label: "com.narcotic.modafinil.power-notices")
     private var listener: NWListener?
@@ -12,7 +16,12 @@ final class RemotePowerNotices {
     private var lastPublished: Bool?
     private var peerHosts: [String] = UserDefaults.standard.stringArray(forKey: "powerNoticeObservers") ?? []
     private var lastRevision: Int64 = 0
+    private var lastSecret: Data?
+    private var refreshTimer: DispatchSourceTimer?
+    private var pathMonitor: NWPathMonitor?
     var onNotice: ((String, Bool) -> Void)?
+
+    static let refreshInterval: TimeInterval = 60
 
     static let directory = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/Modafinil/remote-power", isDirectory: true)
@@ -34,6 +43,32 @@ final class RemotePowerNotices {
             self.listener = listener
             listener.start(queue: queue)
         } catch { NSLog("Modafinil power notices: %@", error.localizedDescription) }
+        startRefreshing()
+    }
+    private func startRefreshing() {
+        guard refreshTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + Self.refreshInterval, repeating: Self.refreshInterval,
+                       leeway: .seconds(10))
+        timer.setEventHandler { [weak self] in self?.resendCurrent() }
+        timer.resume()
+        refreshTimer = timer
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            // A new route (Tailscale connecting after login) may reach observers
+            // that the launch-time notice missed. Let the interfaces settle first.
+            guard path.status == .satisfied else { return }
+            self?.queue.asyncAfter(deadline: .now() + 2) { self?.resendCurrent() }
+        }
+        monitor.start(queue: queue)
+        pathMonitor = monitor
+    }
+    /// Re-signs the last published state without a new revision. Runs on `queue`.
+    private func resendCurrent() {
+        guard let sleeping = lastPublished, let secret = lastSecret, !peerHosts.isEmpty else { return }
+        let notice = RemotePowerNotice.signed(sleeping: sleeping, secret: secret, revision: lastRevision)
+        guard let data = try? RemoteWireCodec.encodeLine(notice) else { return }
+        for host in peerHosts { send(data, to: host) }
     }
     func remember(_ host: String) {
         queue.async {
@@ -45,6 +80,7 @@ final class RemotePowerNotices {
     }
     func publish(sleeping: Bool, secret: Data) {
         queue.async {
+            self.lastSecret = secret
             guard self.lastPublished != sleeping else { return }
             self.lastPublished = sleeping
             self.lastRevision = max(self.lastRevision + 1, Int64(Date().timeIntervalSince1970 * 1_000_000))
