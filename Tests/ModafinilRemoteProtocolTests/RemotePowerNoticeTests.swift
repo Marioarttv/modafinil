@@ -19,6 +19,14 @@ final class RemotePowerNoticeTests: XCTestCase {
         XCTAssertNil(RemotePowerNotice.verify(wake, secret: secret, now: 1061))
         XCTAssertNil(RemotePowerNotice.verify(wake, secret: secret, now: 939))
     }
+    func testRefreshWithSameRevisionReachesOnlyObserversThatMissedIt() {
+        // 23 Nov 2026: the mini's launch-time wake notice was lost after a boot, and the
+        // MacBook kept the shutdown's sleep notice for 40 hours. Refreshes re-sign the
+        // current state with its revision and a fresh timestamp.
+        let refresh = RemotePowerNotice.signed(sleeping: false, secret: secret, revision: 200, timestamp: 5000)
+        XCTAssertEqual(RemotePowerNotice.verify(refresh, secret: secret, lastRevision: 100, now: 5000)?.sleeping, false)
+        XCTAssertNil(RemotePowerNotice.verify(refresh, secret: secret, lastRevision: 200, now: 5000))
+    }
     func testTamperingCannotChangeSleepIntent() {
         let notice = RemotePowerNotice.signed(sleeping: true, secret: secret, revision: 100, timestamp: 1000)
         let modified = RemoteResponse(version: 6, requestID: notice.requestID, timestamp: 1000, ok: true,
